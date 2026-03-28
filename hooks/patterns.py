@@ -252,8 +252,8 @@ SECRET_PATTERNS = [
 
     # Connection strings with passwords
     ("MONGODB_URL", r'mongodb(?:\+srv)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
-    ("POSTGRES_URL", r'postgres(?:ql)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
-    ("MYSQL_URL", r'mysql://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
+    ("POSTGRES_URL", r'postgres(?:ql)?(?:\+[a-z0-9_]+)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
+    ("MYSQL_URL", r'mysql(?:\+[a-z0-9_]+)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
     ("REDIS_URL", r'rediss?://[^\s"\'<>]*:[^\s"\'<>@]+@[^\s"\'<>]+'),
     # PlanetScale
     ("PLANETSCALE_PASSWORD", r'pscale_pw_[A-Za-z0-9_-]{43}'),
