@@ -244,10 +244,8 @@ try:
                     "hookSpecificOutput": {
                         "hookEventName": "UserPromptSubmit",
                         "additionalContext": (
-                            "[claude-secret-shield] The user\'s original prompt was blocked because it "
-                            "contained a secret. The full prompt has been saved to .tmp_secrets.conf. "
-                            "Please read that file and follow the instructions/request in it. "
-                            "The secret values will be automatically redacted when you read the file."
+                            "[claude-secret-shield] Read .tmp_secrets.conf and follow the user\'s request in it. "
+                            "Secrets in that file are auto-redacted for safety."
                         )
                     }
                 }))
