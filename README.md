@@ -10,7 +10,7 @@ If you find this useful, please give it a star to help others discover it.
 
 ## Features
 
-- **140+ secret patterns** -- OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, database URLs, private keys, JWTs, and 90+ more
+- **164 secret patterns** -- OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, database URLs, private keys, JWTs, and 90+ more
 - **36+ blocked file types** -- `.env`, `credentials.json`, `id_rsa`, `.pem`, `.p12`, `.pfx`, and more
 - **Prompt scanning** -- blocks secrets pasted directly in user prompts before they reach the API
 - **Automatic restore** -- secrets restored to real values when Claude writes code
@@ -24,7 +24,7 @@ If you find this useful, please give it a star to help others discover it.
 - **Atomic writes** -- tempfile + rename prevents file corruption on crash
 - **Crash recovery** -- orphaned backups automatically restored on next invocation
 - **Debug mode** -- `REDACT_DEBUG=1` for troubleshooting
-- **221 E2E tests** -- comprehensive test coverage
+- **245 E2E tests** -- comprehensive test coverage
 
 ## How It Works
 
@@ -55,7 +55,7 @@ to read `.env`, `credentials.json`, `id_rsa`, or any of the 36 blocked file type
 the hook denies the read entirely. Claude gets an error message suggesting alternatives.
 
 **Layer 2 -- Pattern Redaction:** For every other file, the hook scans the content
-against 140+ regex patterns. Any match is replaced with a deterministic placeholder
+against 164 regex patterns. Any match is replaced with a deterministic placeholder
 like `{{OPENAI_KEY_a1b2c3d4}}`. Claude sees the placeholder, never the real key.
 
 **Layer 3 -- Auto Restore:** When Claude writes or edits a file, the hook
@@ -208,14 +208,16 @@ For the complete pattern catalog with prefixes, examples, and selection criteria
 | DevOps / CI-CD | 28 | GitHub (6 token types), GitLab (5), Bitbucket, npm, PyPI, Docker Hub, Terraform, Vault, Grafana, Pulumi, Linear |
 | Payment Processors | 10 | Stripe (4 key types), Square, PayPal/Braintree, Adyen, Flutterwave |
 | Communication | 13 | Slack (4 token types), Discord, Twilio, SendGrid, Mailchimp, Mailgun, Telegram, Teams |
-| Database / Storage | 8 | PostgreSQL, MySQL, MongoDB, Redis (connection strings with passwords), PlanetScale, Contentful |
+| Database / Storage | 26 | PostgreSQL, MySQL, MariaDB, MSSQL, Oracle, MongoDB, Redis, Cassandra, Neo4j, CouchDB, ArangoDB, ClickHouse, Snowflake, Redshift, DB2, HANA, Firebird, CockroachDB, TiDB, Databricks, and more |
 | Analytics / Monitoring | 5 | New Relic, Sentry, Dynatrace |
 | Auth Providers | 2 | 1Password, Age encryption |
 | Other Services | 16 | Shopify, HubSpot, Postman, JFrog, Duffel, Typeform, EasyPost, and more |
+| Message Queues | 4 | AMQP/RabbitMQ, NATS, MQTT, STOMP |
+| Network / Auth | 3 | FTP/SFTP, LDAP/LDAPS, HTTP Basic Auth |
 | Git Credentials | 3 | GitHub/GitLab/generic URLs with embedded tokens |
 | Private Keys / Tokens | 2 | PEM private key blocks, JWT tokens |
 | Generic Patterns | 3 | `api_key=...`, `password=...`, base64 secrets in env-like contexts |
-| **Total** | **140+** | |
+| **Total** | **164** | |
 
 ## Security Scope
 
@@ -227,7 +229,7 @@ This is a **Claude Code hook** that prevents Claude from **seeing** your real se
 
 | Threat | Protected? | How |
 |--------|-----------|-----|
-| Claude seeing your API keys in code | Yes | Pattern-based redaction (140 patterns) |
+| Claude seeing your API keys in code | Yes | Pattern-based redaction (164 patterns) |
 | Claude reading .env / credentials files | Yes | File blocking (30 file types) |
 | Claude seeing database passwords in connection strings | Yes | Pattern matching (MongoDB, PostgreSQL, MySQL, Redis URLs) |
 | Claude seeing private keys (RSA, Ed25519, etc.) | Yes | PEM header detection + file blocking |
@@ -366,7 +368,7 @@ Or without pytest:
 python3 test_hook.py
 ```
 
-221 tests cover:
+245 tests cover:
 
 - **Prompt scanning** (secret detection, blocking, truncated previews, safe prompts allowed)
 - Block list enforcement (blocked files, allowed files)

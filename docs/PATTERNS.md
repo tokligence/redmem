@@ -21,7 +21,7 @@ These files are blocked from being read by Claude entirely:
 
 ---
 
-## Secret Patterns (140 patterns, 10 categories)
+## Secret Patterns (164 patterns, 10 categories)
 
 ### AI / ML Providers (17 patterns)
 
@@ -141,7 +141,7 @@ These files are blocked from being read by Claude entirely:
 | INTERCOM_TOKEN | `dG9rO` (base64 "tok:") | Intercom |
 | BREVO_KEY | `xkeysib-` | Brevo/Sendinblue |
 
-### Database / Storage (8 patterns)
+### Database / Storage (26 patterns)
 
 | Pattern | Format | Provider |
 |---------|--------|----------|

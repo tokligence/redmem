@@ -10,7 +10,7 @@
 
 ## 功能特性
 
-- **140+ 种秘密模式** -- 涵盖 OpenAI、Anthropic、AWS、GitHub、Stripe、Slack、数据库连接串、私钥、JWT 等 90+ 种类型
+- **164 种秘密模式** -- 涵盖 OpenAI、Anthropic、AWS、GitHub、Stripe、Slack、数据库连接串、私钥、JWT 等 90+ 种类型
 - **36+ 种文件类型拦截** -- `.env`、`credentials.json`、`id_rsa`、`.pem`、`.p12`、`.pfx` 等
 - **用户输入扫描** -- 在 prompt 中粘贴秘密时自动拦截，防止发送到 API
 - **自动还原** -- Claude 写入代码时，占位符自动还原为真实值
@@ -24,7 +24,7 @@
 - **原子写入** -- 使用 tempfile + rename，崩溃时不会损坏文件
 - **崩溃恢复** -- 遗留的备份文件在下次调用时自动恢复
 - **调试模式** -- 设置 `REDACT_DEBUG=1` 进行排查
-- **221 个端到端测试** -- 全面的测试覆盖
+- **245 个端���端测试** -- 全面的测试覆盖
 
 ## 工作原理
 
@@ -48,7 +48,7 @@
 
 **第 1 层 -- 文件拦截（Block List）：** 某些文件不应该被读取。当 Claude 尝试读取 `.env`、`credentials.json`、`id_rsa` 或其他 30 种被拦截的文件类型时，hook 会直接拒绝读取。Claude 会收到一条错误信息，建议使用其他替代方式。
 
-**第 2 层 -- 模式脱敏（Pattern Redaction）：** 对于其他所有文件，hook 会用 140+ 个正则表达式模式扫描内容。匹配到的秘密值会被替换为确定性的占位符，如 `{{OPENAI_KEY_a1b2c3d4}}`。Claude 只能看到占位符，永远看不到真实的 key。
+**第 2 层 -- 模式脱敏（Pattern Redaction）：** 对于其他所有文件，hook 会用 164 个正则表达式模式扫描内容。匹配到的秘密值会被替换为确定性的占位符，如 `{{OPENAI_KEY_a1b2c3d4}}`。Claude 只能看到占位符，永远看不到真实的 key。
 
 **第 3 层 -- 自动还原（Auto Restore）：** 当 Claude 写入或编辑文件时，hook 会静默地将所有占位符替换回真实的秘密值。磁盘上的代码始终保持真实凭据。Claude 对此毫无感知。
 
