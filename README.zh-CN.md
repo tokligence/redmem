@@ -4,6 +4,10 @@
 
 > 在使用 Claude Code 时保护你的秘密凭据。自动检测、脱敏和还原 API key、token、密码及各类凭据。
 
+如果觉得有用，请给个 Star 帮助更多人发现这个项目。
+
+[![GitHub stars](https://img.shields.io/github/stars/tokligence/claude-secret-shield?style=social)](https://github.com/tokligence/claude-secret-shield)
+
 ## 功能特性
 
 - **108 种秘密模式** -- 涵盖 OpenAI、Anthropic、AWS、GitHub、Stripe、Slack、数据库连接串、私钥、JWT 等 90+ 种类型

@@ -4,6 +4,10 @@
 
 > Protect your secrets when using Claude Code. Automatic detection, redaction, and restoration of API keys, tokens, passwords, and credentials.
 
+If you find this useful, please give it a star to help others discover it.
+
+[![GitHub stars](https://img.shields.io/github/stars/tokligence/claude-secret-shield?style=social)](https://github.com/tokligence/claude-secret-shield)
+
 ## Features
 
 - **140 secret patterns** -- OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, database URLs, private keys, JWTs, and 90+ more
