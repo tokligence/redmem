@@ -12,7 +12,7 @@ echo "  Uninstalling claude-secret-shield..."
 echo ""
 
 # Remove hook files
-for f in redact-restore.py patterns.py redact-secrets.sh; do
+for f in redact-restore.py patterns.py redact-secrets.sh custom-patterns.example.py; do
   if [ -f "$HOOKS_DIR/$f" ]; then
     rm "$HOOKS_DIR/$f"
     echo "  OK: Removed $HOOKS_DIR/$f"
@@ -34,34 +34,41 @@ fi
 # Remove from settings.json
 if [ -f "$SETTINGS_FILE" ] && command -v jq >/dev/null 2>&1; then
   UPDATED=$(cat "$SETTINGS_FILE" | jq '
+    def is_secret_shield_hook:
+      any(
+        (.hooks // [])[].command?;
+        . == "~/.claude/hooks/redact-secrets.sh" or . == "python3 ~/.claude/hooks/redact-restore.py"
+      )
+      or (.command? == "~/.claude/hooks/redact-secrets.sh")
+      or (.command? == "python3 ~/.claude/hooks/redact-restore.py");
     if .hooks.PreToolUse then
       .hooks.PreToolUse = [
         .hooks.PreToolUse[]
-        | select(
-            (.hooks[0].command != "~/.claude/hooks/redact-secrets.sh") and
-            (.hooks[0].command != "python3 ~/.claude/hooks/redact-restore.py")
-          )
+        | select(is_secret_shield_hook | not)
       ]
     else . end
     | if .hooks.PostToolUse then
       .hooks.PostToolUse = [
         .hooks.PostToolUse[]
-        | select(
-            (.hooks[0].command != "python3 ~/.claude/hooks/redact-restore.py")
-          )
+        | select(is_secret_shield_hook | not)
       ]
     else . end
     | if .hooks.SessionEnd then
       .hooks.SessionEnd = [
         .hooks.SessionEnd[]
-        | select(
-            (.hooks[0].command != "python3 ~/.claude/hooks/redact-restore.py")
-          )
+        | select(is_secret_shield_hook | not)
+      ]
+    else . end
+    | if .hooks.UserPromptSubmit then
+      .hooks.UserPromptSubmit = [
+        .hooks.UserPromptSubmit[]
+        | select(is_secret_shield_hook | not)
       ]
     else . end
     | if .hooks.PreToolUse == [] then del(.hooks.PreToolUse) else . end
     | if .hooks.PostToolUse == [] then del(.hooks.PostToolUse) else . end
     | if .hooks.SessionEnd == [] then del(.hooks.SessionEnd) else . end
+    | if .hooks.UserPromptSubmit == [] then del(.hooks.UserPromptSubmit) else . end
     | if .hooks == {} then del(.hooks) else . end
   ')
   echo "$UPDATED" | jq '.' > "$SETTINGS_FILE"
