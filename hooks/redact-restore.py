@@ -40,6 +40,7 @@ import fcntl
 import fnmatch
 import stat as stat_module
 import time
+import uuid
 
 # ── Debug logging ────────────────────────────────────────────────────────
 DEBUG = os.environ.get("REDACT_DEBUG", "0") == "1"
@@ -212,6 +213,59 @@ def get_prompt_storage_dir(payload):
     return os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
 
 
+def get_session_id(payload):
+    """Extract a stable session identifier for prompt continuation state."""
+    value = payload.get("session_id")
+    if isinstance(value, str) and value:
+        return value
+    return "default"
+
+
+def get_agent_scope(payload):
+    """Scope prompt continuation to the current agent when available."""
+    for key in ("agent_id", "agent_type", "transcript_path"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return "main"
+
+
+def get_prompt_state_key(payload):
+    """Use session + agent scope so parallel subagents do not share state."""
+    return f"{get_session_id(payload)}::{get_agent_scope(payload)}"
+
+
+def get_session_state_path(state_key):
+    """Store per-agent prompt continuation state outside the repo."""
+    session_hash = hashlib.sha256(state_key.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return os.path.join(tempfile.gettempdir(), f".claude-secret-shield-{session_hash}.json")
+
+
+def load_session_state(state_key):
+    path = get_session_state_path(state_key)
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def save_session_state(state_key, state):
+    path = get_session_state_path(state_key)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(state, f)
+
+
+def delete_session_state(state_key):
+    path = get_session_state_path(state_key)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
 def build_redacted_prompt(prompt):
     """Create a redacted copy of the prompt for safe additionalContext."""
     matches = []
@@ -245,6 +299,44 @@ def build_redacted_prompt(prompt):
     return redacted, found_secrets
 
 
+def cleanup_prompt_artifacts_from_paths(*paths):
+    """Delete temporary prompt files created for the go/continue flow."""
+    for path in paths:
+        if not path:
+            continue
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                debug_log(f"Deleted prompt artifact: {path}")
+        except OSError:
+            pass
+
+
+def cleanup_prompt_artifacts_in_dir(base_dir):
+    """Best-effort cleanup for both legacy and nonce prompt temp files."""
+    if not base_dir or not os.path.isdir(base_dir):
+        return
+    for name in os.listdir(base_dir):
+        if re.match(r"^\.tmp_secrets(?:\.[a-f0-9]{12})?(?:\.prompt\.txt|\.conf)$", name):
+            cleanup_prompt_artifacts_from_paths(os.path.join(base_dir, name))
+
+
+def cleanup_legacy_prompt_artifacts_in_dir(base_dir):
+    """Only clean up legacy shared prompt temp files."""
+    if not base_dir or not os.path.isdir(base_dir):
+        return
+    for name in (".tmp_secrets.conf", ".tmp_secrets.prompt.txt"):
+        cleanup_prompt_artifacts_from_paths(os.path.join(base_dir, name))
+
+
+def cleanup_prompt_artifacts_for_session(state_key):
+    state = load_session_state(state_key)
+    if not state:
+        return
+    cleanup_prompt_artifacts_from_paths(state.get("tmp_file"), state.get("tmp_context_file"))
+    delete_session_state(state_key)
+
+
 try:
     # ══════════════════════════════════════════════════════════════════════════
     # UserPromptSubmit: Scan user prompt for secrets before sending to API
@@ -253,11 +345,13 @@ try:
     if hook_event == "UserPromptSubmit":
         prompt = get_prompt_text(input_data)
         prompt_dir = get_prompt_storage_dir(input_data)
-        tmp_file = os.path.join(prompt_dir, ".tmp_secrets.conf")
-        tmp_context_file = os.path.join(prompt_dir, ".tmp_secrets.prompt.txt")
+        state_key = get_prompt_state_key(input_data)
         if prompt:
             redacted_prompt, found_secrets = build_redacted_prompt(prompt)
             if found_secrets:
+                nonce = uuid.uuid4().hex[:12]
+                tmp_file = os.path.join(prompt_dir, f".tmp_secrets.{nonce}.conf")
+                tmp_context_file = os.path.join(prompt_dir, f".tmp_secrets.{nonce}.prompt.txt")
                 secret_list = ", ".join(f"{n} ({p})" for n, p in found_secrets[:5])
                 extra = f" and {len(found_secrets) - 5} more" if len(found_secrets) > 5 else ""
                 # Save the full prompt plus a redacted companion so "go" can restore intent safely.
@@ -269,6 +363,18 @@ try:
                         tf.write(redacted_prompt)
                     os.chmod(tmp_file, 0o600)
                     os.chmod(tmp_context_file, 0o600)
+                    previous_state = load_session_state(state_key)
+                    save_session_state(state_key, {
+                        "nonce": nonce,
+                        "prompt_dir": prompt_dir,
+                        "tmp_file": tmp_file,
+                        "tmp_context_file": tmp_context_file,
+                    })
+                    if previous_state:
+                        cleanup_prompt_artifacts_from_paths(
+                            previous_state.get("tmp_file"),
+                            previous_state.get("tmp_context_file"),
+                        )
                     debug_log(f"Saved prompt to {tmp_file}")
                     saved = True
                 except OSError as e:
@@ -294,7 +400,10 @@ try:
                 sys.exit(0)
         # Check if user typed "go" to continue from a blocked prompt
         if prompt.strip().lower() in ("go", "go.", "继续", "continue"):
-            if os.path.exists(tmp_file):
+            state = load_session_state(state_key)
+            tmp_file = state.get("tmp_file") if state else None
+            tmp_context_file = state.get("tmp_context_file") if state else None
+            if tmp_file and os.path.exists(tmp_file):
                 debug_log("UserPromptSubmit: 'go' detected with .tmp_secrets.conf, adding context")
                 redacted_prompt = ""
                 try:
@@ -608,8 +717,13 @@ try:
 
     # ── Auto-gitignore .tmp_secrets.conf ────────────────────────────────────
     def ensure_gitignore(file_path):
-        """If file_path is .tmp_secrets.conf, ensure it's in the nearest .gitignore."""
-        if os.path.basename(file_path) != ".tmp_secrets.conf":
+        """If file_path is a temporary prompt file, ensure both are gitignored."""
+        basename = os.path.basename(file_path)
+        if not (
+            basename in (".tmp_secrets.conf", ".tmp_secrets.prompt.txt")
+            or re.match(r"\.tmp_secrets\.[a-f0-9]{12}\.conf$", basename)
+            or re.match(r"\.tmp_secrets\.[a-f0-9]{12}\.prompt\.txt$", basename)
+        ):
             return
         # Find the repo root (nearest .git directory)
         d = os.path.dirname(os.path.abspath(file_path))
@@ -621,20 +735,31 @@ try:
             d = os.path.dirname(d)
         if not gitignore_path:
             return
-        # Check if already ignored
-        entry = ".tmp_secrets.conf"
+        entries = [
+            "# Auto-added by claude-secret-shield",
+            ".tmp_secrets.conf",
+            ".tmp_secrets.prompt.txt",
+            ".tmp_secrets.*.conf",
+            ".tmp_secrets.*.prompt.txt",
+        ]
         if os.path.exists(gitignore_path):
             try:
                 with open(gitignore_path, "r") as f:
-                    if entry in f.read():
+                    contents = f.read()
+                    if (
+                        ".tmp_secrets.conf" in contents
+                        and ".tmp_secrets.prompt.txt" in contents
+                        and ".tmp_secrets.*.conf" in contents
+                        and ".tmp_secrets.*.prompt.txt" in contents
+                    ):
                         return
             except OSError:
                 return
         # Append to .gitignore
         try:
             with open(gitignore_path, "a") as f:
-                f.write(f"\n# Auto-added by claude-secret-shield\n{entry}\n")
-            debug_log(f"Added {entry} to {gitignore_path}")
+                f.write("\n" + "\n".join(entries) + "\n")
+            debug_log(f"Added prompt temp files to {gitignore_path}")
         except OSError:
             pass
 
@@ -682,12 +807,13 @@ try:
     if is_post_hook:
         file_path = tool_input.get("file_path", "")
 
-        # Auto-delete .tmp_secrets.conf after any tool reads it
-        if tool_name == "Read" and file_path and os.path.basename(file_path) == ".tmp_secrets.conf":
+        # Auto-delete prompt artifacts after any tool reads .tmp_secrets.conf
+        tmp_match = re.match(r"^\.tmp_secrets(?:\.[a-f0-9]{12})?\.conf$", os.path.basename(file_path or ""))
+        if tool_name == "Read" and file_path and tmp_match:
             # Schedule deletion after restore completes (see below)
-            _delete_tmp_secrets = file_path
+            _delete_tmp_secrets_file = file_path
         else:
-            _delete_tmp_secrets = None
+            _delete_tmp_secrets_file = None
 
         if file_path and tool_name in ("Read", "Write", "Edit"):
             bp = backup_path_for(file_path)
@@ -737,14 +863,10 @@ try:
                 # were restored in PreToolUse). Just clean up backup.
                 cleanup_backup(file_path)
 
-        # Auto-delete .tmp_secrets.conf after restore is complete
-        if _delete_tmp_secrets:
-            try:
-                if os.path.exists(_delete_tmp_secrets):
-                    os.remove(_delete_tmp_secrets)
-                    debug_log(f"Auto-deleted {_delete_tmp_secrets} after read")
-            except OSError:
-                pass
+        # Auto-delete prompt artifacts after restore is complete
+        if _delete_tmp_secrets_file:
+            context_file = _delete_tmp_secrets_file.replace(".conf", ".prompt.txt")
+            cleanup_prompt_artifacts_from_paths(_delete_tmp_secrets_file, context_file)
 
         sys.exit(0)
 
@@ -757,6 +879,8 @@ try:
         debug_log("Session end: cleaning up backups (mapping preserved)")
         # Do NOT delete the global mapping file — it persists across sessions
         debug_log(f"Session ended, mapping preserved at {MAPPING_FILE}")
+        cleanup_legacy_prompt_artifacts_in_dir(get_prompt_storage_dir(input_data))
+        cleanup_prompt_artifacts_for_session(get_prompt_state_key(input_data))
         # Remove any leftover backup files (per-session, transient)
         if os.path.isdir(BACKUP_DIR):
             try:

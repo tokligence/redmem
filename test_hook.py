@@ -699,6 +699,30 @@ class TestSessionLifecycle:
             if os.path.exists(f):
                 os.unlink(f)
 
+    def test_session_end_cleans_prompt_artifacts(self, sid, tmp_path):
+        for name in (".tmp_secrets.conf", ".tmp_secrets.prompt.txt"):
+            p = tmp_path / name
+            p.write_text("secret")
+            os.chmod(p, 0o600)
+
+        payload = {
+            "tool_name": "SessionEnd",
+            "tool_input": {},
+            "session_id": sid,
+            "type": "SessionEnd",
+            "cwd": str(tmp_path),
+        }
+        r = subprocess.run(
+            [sys.executable, HOOK_SCRIPT],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert r.returncode == 0
+        assert not (tmp_path / ".tmp_secrets.conf").exists()
+        assert not (tmp_path / ".tmp_secrets.prompt.txt").exists()
+
     def test_mapping_persistence_within_session(self, sid):
         """Redact in PreToolUse — mapping exists — restore in PostToolUse uses same mapping."""
         token = "ghp_" + "Y" * 36
@@ -1128,8 +1152,8 @@ if __name__ == "__main__":
 class TestUserPromptSubmit:
     """Test that secrets in user prompts are detected and blocked."""
 
-    def _run_prompt_hook(self, prompt_text, *, field="prompt", cwd=None, extra_payload=None):
-        payload = {"hook_event_name": "UserPromptSubmit", "session_id": _session_id(), field: prompt_text}
+    def _run_prompt_hook(self, prompt_text, *, field="prompt", cwd=None, extra_payload=None, session_id=None):
+        payload = {"hook_event_name": "UserPromptSubmit", "session_id": session_id or _session_id(), field: prompt_text}
         if cwd is not None:
             payload["cwd"] = str(cwd)
         if extra_payload:
@@ -1229,22 +1253,159 @@ class TestUserPromptSubmit:
         assert result["decision"] == "block"
 
     def test_go_restores_redacted_context(self, tmp_path):
+        session_id = "go-restore-session"
         blocked_prompt = (
             "帮我配置 git，在 /tmp/a 用 tony.seah@kleepay.ai，"
             "在 /tmp/b 用 seahkweehwatony@gmail.com"
         )
-        result, code, _ = self._run_prompt_hook(blocked_prompt, cwd=tmp_path, field="user_prompt")
+        result, code, _ = self._run_prompt_hook(
+            blocked_prompt, cwd=tmp_path, field="user_prompt", session_id=session_id
+        )
         assert code == 0 and result is not None
         assert result["decision"] == "block"
-        assert (tmp_path / ".tmp_secrets.conf").exists()
-        assert (tmp_path / ".tmp_secrets.prompt.txt").exists()
+        conf_files = list(tmp_path.glob(".tmp_secrets.*.conf"))
+        prompt_files = list(tmp_path.glob(".tmp_secrets.*.prompt.txt"))
+        assert len(conf_files) == 1
+        assert len(prompt_files) == 1
 
-        result, code, _ = self._run_prompt_hook("go", cwd=tmp_path, field="user_prompt")
+        result, code, _ = self._run_prompt_hook("go", cwd=tmp_path, field="user_prompt", session_id=session_id)
         assert code == 0 and result is not None
         extra = result["hookSpecificOutput"]["additionalContext"]
         assert "continue that same request" in extra.lower()
         assert "treat those placeholders as the actual values" in extra.lower()
         assert "do not ask the user to manually substitute" in extra.lower()
-        assert str(tmp_path / ".tmp_secrets.conf") in extra
+        assert str(conf_files[0]) in extra
         assert "帮我配置 git" in extra
         assert "{{EMAIL_" in extra
+
+    def test_reading_tmp_secrets_conf_deletes_both_temp_files(self, sid, tmp_path):
+        conf = tmp_path / ".tmp_secrets.123456abcdef.conf"
+        ctx = tmp_path / ".tmp_secrets.123456abcdef.prompt.txt"
+        conf.write_text("secret")
+        ctx.write_text("redacted")
+        os.chmod(conf, 0o600)
+        os.chmod(ctx, 0o600)
+
+        o, c, _ = run_hook("Read", {"file_path": str(conf)}, sid)
+        assert c == 0
+        run_hook("Read", {"file_path": str(conf)}, sid, is_post=True)
+        assert not conf.exists()
+        assert not ctx.exists()
+
+    def test_concurrent_sessions_use_distinct_prompt_artifacts(self, tmp_path):
+        session_a = "session-a"
+        session_b = "session-b"
+        prompt_a = "邮箱 seahkweehwatony@gmail.com"
+        prompt_b = "邮箱 tony.seah@kleepay.ai"
+
+        result_a, code_a, _ = self._run_prompt_hook(prompt_a, cwd=tmp_path, field="user_prompt", session_id=session_a)
+        result_b, code_b, _ = self._run_prompt_hook(prompt_b, cwd=tmp_path, field="user_prompt", session_id=session_b)
+        assert code_a == 0 and result_a is not None and result_a["decision"] == "block"
+        assert code_b == 0 and result_b is not None and result_b["decision"] == "block"
+
+        files = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(".tmp_secrets.") and p.suffix in (".conf", ".txt"))
+        assert len(files) == 4
+
+        result_a, code_a, _ = self._run_prompt_hook("go", cwd=tmp_path, field="user_prompt", session_id=session_a)
+        result_b, code_b, _ = self._run_prompt_hook("go", cwd=tmp_path, field="user_prompt", session_id=session_b)
+        assert code_a == 0 and result_a is not None
+        assert code_b == 0 and result_b is not None
+        extra_a = result_a["hookSpecificOutput"]["additionalContext"]
+        extra_b = result_b["hookSpecificOutput"]["additionalContext"]
+        assert extra_a != extra_b
+        assert "a@example.com" not in extra_a
+        assert "b@example.com" not in extra_b
+        assert "邮箱" in extra_a and "邮箱" in extra_b
+        assert extra_a.count(".tmp_secrets.") == 1
+        assert extra_b.count(".tmp_secrets.") == 1
+
+    def test_new_blocked_prompt_replaces_only_same_session_state(self, tmp_path):
+        session_id = "replace-session"
+        prompt_a = "first seahkweehwatony@gmail.com"
+        prompt_b = "second tony.seah@kleepay.ai"
+
+        self._run_prompt_hook(prompt_a, cwd=tmp_path, field="user_prompt", session_id=session_id)
+        self._run_prompt_hook(prompt_b, cwd=tmp_path, field="user_prompt", session_id=session_id)
+
+        conf_files = sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".conf"))
+        prompt_files = sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".prompt.txt"))
+        assert len(conf_files) == 1
+        assert len(prompt_files) == 1
+
+        result, code, _ = self._run_prompt_hook("go", cwd=tmp_path, field="user_prompt", session_id=session_id)
+        assert code == 0 and result is not None
+        extra = result["hookSpecificOutput"]["additionalContext"]
+        assert "second" in extra
+
+    def test_parallel_subagents_same_session_use_distinct_state(self, tmp_path):
+        session_id = "shared-session"
+        prompt_a = "alpha seahkweehwatony@gmail.com"
+        prompt_b = "beta tony.seah@kleepay.ai"
+
+        extra_a = {"agent_id": "subagent-a", "agent_type": "worker"}
+        extra_b = {"agent_id": "subagent-b", "agent_type": "worker"}
+
+        result_a, code_a, _ = self._run_prompt_hook(
+            prompt_a, cwd=tmp_path, field="user_prompt", session_id=session_id, extra_payload=extra_a
+        )
+        result_b, code_b, _ = self._run_prompt_hook(
+            prompt_b, cwd=tmp_path, field="user_prompt", session_id=session_id, extra_payload=extra_b
+        )
+        assert code_a == 0 and result_a is not None and result_a["decision"] == "block"
+        assert code_b == 0 and result_b is not None and result_b["decision"] == "block"
+
+        result_a, code_a, _ = self._run_prompt_hook(
+            "go", cwd=tmp_path, field="user_prompt", session_id=session_id, extra_payload=extra_a
+        )
+        result_b, code_b, _ = self._run_prompt_hook(
+            "go", cwd=tmp_path, field="user_prompt", session_id=session_id, extra_payload=extra_b
+        )
+        assert code_a == 0 and result_a is not None
+        assert code_b == 0 and result_b is not None
+        extra_text_a = result_a["hookSpecificOutput"]["additionalContext"]
+        extra_text_b = result_b["hookSpecificOutput"]["additionalContext"]
+        assert "alpha" in extra_text_a
+        assert "beta" not in extra_text_a
+        assert "beta" in extra_text_b
+        assert "alpha" not in extra_text_b
+
+    def test_session_end_only_cleans_current_session_prompt_artifacts(self, tmp_path):
+        session_a = "session-a"
+        session_b = "session-b"
+
+        result_a, code_a, _ = self._run_prompt_hook(
+            "alpha seahkweehwatony@gmail.com", cwd=tmp_path, field="user_prompt", session_id=session_a
+        )
+        result_b, code_b, _ = self._run_prompt_hook(
+            "beta tony.seah@kleepay.ai", cwd=tmp_path, field="user_prompt", session_id=session_b
+        )
+        assert code_a == 0 and result_a is not None and result_a["decision"] == "block"
+        assert code_b == 0 and result_b is not None and result_b["decision"] == "block"
+
+        before_files = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(".tmp_secrets."))
+        assert len(before_files) == 4
+
+        payload = {
+            "tool_name": "SessionEnd",
+            "tool_input": {},
+            "session_id": session_a,
+            "type": "SessionEnd",
+            "cwd": str(tmp_path),
+        }
+        r = subprocess.run(
+            [sys.executable, HOOK_SCRIPT],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert r.returncode == 0
+
+        after_files = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(".tmp_secrets."))
+        assert len(after_files) == 2
+
+        result_b, code_b, _ = self._run_prompt_hook("go", cwd=tmp_path, field="user_prompt", session_id=session_b)
+        assert code_b == 0 and result_b is not None
+        extra_b = result_b["hookSpecificOutput"]["additionalContext"]
+        assert "beta" in extra_b
+        assert "alpha" not in extra_b
