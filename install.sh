@@ -65,27 +65,9 @@ fi
 # Merge into settings.json
 echo "  -> Configuring Claude Code settings..."
 
-PRE_HOOK_CONFIG='{
-  "matcher": "Read|Write|Edit|Bash",
-  "hooks": [
-    {
-      "type": "command",
-      "command": "python3 ~/.claude/hooks/redact-restore.py",
-      "timeout": 5}]
-    }
-  ]
-}'
+PRE_HOOK_CONFIG='{"matcher":"Read|Write|Edit|Bash","hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redact-restore.py","timeout":5}]}'
 
-POST_HOOK_CONFIG='{
-  "matcher": "Read|Write|Edit",
-  "hooks": [
-    {
-      "type": "command",
-      "command": "python3 ~/.claude/hooks/redact-restore.py",
-      "timeout": 5}]
-    }
-  ]
-}'
+POST_HOOK_CONFIG='{"matcher":"Read|Write|Edit","hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redact-restore.py","timeout":5}]}'
 
 
 SESSION_END_HOOK_CONFIG='{"hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redact-restore.py","timeout":5}]}'
