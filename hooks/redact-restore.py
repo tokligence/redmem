@@ -210,10 +210,11 @@ try:
                     f"🛡️ Message blocked — secret detected: {secret_list}{extra}.\n\n"
                     f"Pasting secrets directly in chat is a data leak risk.\n\n"
                     f"Do this instead:\n"
-                    f"  1. Save your secret to a local file (e.g. secrets.conf or .env.local)\n"
-                    f"  2. Tell Claude where the file is: \"my API key is in secrets.conf\"\n"
-                    f"  3. Claude will read the file — the secret is automatically redacted before Claude sees it, and restored when writing back.\n\n"
-                    f"Your secret stays safe on your machine."
+                    f"  1. Save your secret to .secrets.conf:\n"
+                    f"       echo \"MY_KEY=your-secret-value\" >> .secrets.conf\n"
+                    f"  2. Tell Claude: \"my API key is in .secrets.conf\"\n"
+                    f"  3. Claude reads the file — secret is auto-redacted and protected.\n\n"
+                    f"Your secret never leaves your machine."
                 )
                 debug_log(f"UserPromptSubmit BLOCKED: {[n for n,_ in found_secrets]}")
                 print(json.dumps({
