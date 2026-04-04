@@ -331,13 +331,15 @@ class TestRedactRestore:
             with open(f) as fh:
                 assert fh.read() == orig
 
+            # PreToolUse Edit: file stays with real values (Approach A)
             run_hook("Edit", {"file_path": f, "old_string": "DEBUG=true", "new_string": "DEBUG=false"}, sid)
             with open(f) as fh:
-                redacted = fh.read()
-            assert _ph_prefix("GITHUB_PAT_CLASSIC_") in redacted
+                content = fh.read()
+            # File should still have real values (no re-redaction)
+            assert s in content
 
-            with open(f) as fh:
-                edited = fh.read().replace("DEBUG=true", "DEBUG=false")
+            # Simulate Claude Code applying the edit on the real file
+            edited = content.replace("DEBUG=true", "DEBUG=false")
             with open(f, "w") as fh:
                 fh.write(edited)
 
@@ -933,7 +935,7 @@ class TestE2EFlows:
             os.unlink(f)
 
     def test_full_edit_flow(self, sid):
-        """PreToolUse(Edit) -> old/new strings redacted -> PostToolUse(Edit) -> restored."""
+        """PreToolUse(Edit) -> placeholders restored in old/new -> PostToolUse(Edit) -> file intact."""
         token = "ghp_" + "D" * 36
         orig = f"TOKEN={token}\nDEBUG=true\n"
         f = _tmp(orig)
@@ -944,31 +946,36 @@ class TestE2EFlows:
             with open(f) as fh:
                 assert fh.read() == orig
 
-            # PreToolUse Edit: file gets re-redacted for freshness
+            ph = _ph_from_mapping(token)
+            assert ph is not None
+
+            # PreToolUse Edit: placeholders in old/new restored to real values
             o, c, _ = run_hook("Edit", {
                 "file_path": f,
-                "old_string": "DEBUG=true",
-                "new_string": "DEBUG=false",
+                "old_string": f"TOKEN={ph}\nDEBUG=true",
+                "new_string": f"TOKEN={ph}\nDEBUG=false",
             }, sid)
             assert c == 0
+            assert o is not None
+            updated = o["hookSpecificOutput"]["updatedInput"]
+            assert updated["old_string"] == f"TOKEN={token}\nDEBUG=true"
+            assert updated["new_string"] == f"TOKEN={token}\nDEBUG=false"
 
-            # File should be redacted now
-            with open(f) as fh:
-                redacted = fh.read()
-            assert token not in redacted
-
-            # Simulate Claude Code applying the edit
+            # File still has real values (no re-redaction)
             with open(f) as fh:
                 content = fh.read()
-            content = content.replace("DEBUG=true", "DEBUG=false")
+            assert token in content
+
+            # Simulate Claude Code applying the edit with restored values
+            content = content.replace(f"TOKEN={token}\nDEBUG=true", f"TOKEN={token}\nDEBUG=false")
             with open(f, "w") as fh:
                 fh.write(content)
 
-            # PostToolUse Edit: placeholders in file restored to real values
+            # PostToolUse Edit: file stays intact (real values preserved)
             run_hook("Edit", {"file_path": f}, sid, is_post=True)
             with open(f) as fh:
                 final = fh.read()
-            assert token in final, "Real secret should be restored"
+            assert token in final, "Real secret should be preserved"
             assert "DEBUG=false" in final, "Edit should be preserved"
             assert "DEBUG=true" not in final
         finally:

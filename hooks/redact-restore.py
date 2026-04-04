@@ -975,18 +975,45 @@ try:
 
         file_path = tool_input.get("file_path", "")
 
-        # Re-redact the file so Claude Code's freshness check passes and
-        # old_string (which contains placeholders) matches the file content.
-        # PostToolUse will restore all placeholders in the edited file.
+        # Approach A: Restore placeholders in old_string/new_string back to
+        # real values so the edit matches the actual file on disk.
+        # This avoids the bug where re-redacting the file causes a mismatch
+        # with Claude Code's freshness check or the Edit tool's own content
+        # verification. PostToolUse will restore any remaining placeholders
+        # in the edited file and re-redact new secrets if needed.
+        #
+        # Backup the file first so PostToolUse can detect it was an Edit
+        # on a file with secrets and restore/re-scan accordingly.
         if file_path and os.path.isfile(file_path):
-            if backup_and_redact_file(file_path, mapping):
-                # File is now redacted — old_string/new_string should already
-                # contain placeholders that match. Don't restore them.
-                sys.exit(0)
+            # Create backup without redacting — we need the backup marker
+            # so PostToolUse knows to scan the edited file for placeholders.
+            # We use backup_and_redact_file then immediately restore, but
+            # it's simpler to just create the backup directly.
+            if not is_binary_file(file_path) and not is_ignored(file_path):
+                try:
+                    with open(file_path, "rb") as f:
+                        raw_bytes = f.read()
+                    raw_content = raw_bytes.decode("utf-8", errors="replace")
+                    _, has_secrets = redact_content(raw_content, mapping)
+                    if has_secrets:
+                        save_mapping(mapping)
+                        os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
+                        bp = backup_path_for(file_path)
+                        fd = os.open(bp + ".bak", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                        with os.fdopen(fd, "wb") as f:
+                            f.write(raw_bytes)
+                        file_stat = os.stat(file_path)
+                        with open(bp + ".meta", "w") as f:
+                            json.dump({
+                                "original_path": file_path,
+                                "mode": file_stat.st_mode,
+                                "atime": file_stat.st_atime,
+                                "mtime": file_stat.st_mtime,
+                            }, f)
+                        debug_log(f"Edit: created backup for {file_path} (no redaction)")
+                except (OSError, PermissionError):
+                    pass
 
-        # Fallback (file doesn't exist, no secrets, or backup failed):
-        # restore placeholders in old_string/new_string so they match the
-        # file on disk (which has real values).
         old_string = tool_input.get("old_string", "")
         new_string = tool_input.get("new_string", "")
         restored_old = restore_content(old_string, mapping)
