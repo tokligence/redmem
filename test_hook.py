@@ -1600,25 +1600,25 @@ class TestWeb3Patterns:
 class TestWeb3BlockList:
     """Test that Web3 config files are blocked."""
 
-    def test_block_hardhat_config_js(self, sid):
+
+
+
+
+
+    def test_hardhat_config_not_blocked(self, sid):
+        """hardhat.config.js is scanned (not blocked) since modern configs use process.env."""
         o, c, _ = run_hook("Read", {"file_path": "/project/hardhat.config.js"}, sid)
-        assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert c == 0
+        # Should NOT be denied (no longer in block list)
+        if o:
+            assert o.get("hookSpecificOutput", {}).get("permissionDecision") != "deny"
 
-    def test_block_hardhat_config_ts(self, sid):
-        o, c, _ = run_hook("Read", {"file_path": "/project/hardhat.config.ts"}, sid)
-        assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-    def test_block_truffle_config(self, sid):
-        o, c, _ = run_hook("Read", {"file_path": "/project/truffle-config.js"}, sid)
-        assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-    def test_block_foundry_toml(self, sid):
+    def test_foundry_toml_not_blocked(self, sid):
+        """foundry.toml is scanned (not blocked)."""
         o, c, _ = run_hook("Read", {"file_path": "/project/foundry.toml"}, sid)
-        assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert c == 0
+        if o:
+            assert o.get("hookSpecificOutput", {}).get("permissionDecision") != "deny"
 
     def test_block_mnemonic_txt(self, sid):
         o, c, _ = run_hook("Read", {"file_path": "/project/mnemonic.txt"}, sid)
@@ -1631,15 +1631,7 @@ class TestWeb3BlockList:
         assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-    def test_block_brownie_config(self, sid):
-        o, c, _ = run_hook("Read", {"file_path": "/project/brownie-config.yaml"}, sid)
-        assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_bash_cat_hardhat_blocked(self, sid):
-        o, c, _ = run_hook("Bash", {"command": "cat hardhat.config.js"}, sid)
-        assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     def test_bash_cat_mnemonic_blocked(self, sid):
         o, c, _ = run_hook("Bash", {"command": "cat mnemonic.txt"}, sid)
@@ -2274,6 +2266,47 @@ class TestMaskOutput:
         out, _ = self._run_mask('{"data": {"password": "vaultpass123", "username": "admin"}}')
         data = json.loads(out)
         assert "vaultpass123" not in json.dumps(data)
+
+
+    def test_ssm_string_value_not_masked(self):
+        """SSM String parameter Value should NOT be masked (not a secret)."""
+        payload = {"Parameter": {"Name": "/app/dark-mode", "Type": "String", "Value": "true"}}
+        out, _ = self._run_mask(json.dumps(payload))
+        data = json.loads(out)
+        assert data["Parameter"]["Value"] == "true", "String type Value should not be masked"
+
+    def test_ssm_stringlist_value_not_masked(self):
+        """SSM StringList parameter Value should NOT be masked."""
+        payload = {"Parameter": {"Name": "/app/regions", "Type": "StringList", "Value": "us-east-1,eu-west-1"}}
+        out, _ = self._run_mask(json.dumps(payload))
+        data = json.loads(out)
+        assert data["Parameter"]["Value"] == "us-east-1,eu-west-1"
+
+    def test_ssm_securestring_value_masked(self):
+        """SSM SecureString parameter Value MUST be masked."""
+        payload = {"Parameter": {"Name": "/app/db-pass", "Type": "SecureString", "Value": "MyRealPassword123"}}
+        out, _ = self._run_mask(json.dumps(payload))
+        data = json.loads(out)
+        assert "MyRealPassword123" not in data["Parameter"]["Value"]
+        assert data["Parameter"]["Value"][:3] == "MyR"
+
+    def test_ssm_no_type_field_value_masked(self):
+        """SSM parameter without Type field should be masked (safety fallback)."""
+        payload = {"Parameter": {"Name": "/app/unknown", "Value": "might-be-secret-val"}}
+        out, _ = self._run_mask(json.dumps(payload))
+        data = json.loads(out)
+        assert "might-be-secret-val" not in data["Parameter"]["Value"]
+
+    def test_ssm_batch_mixed_types(self):
+        """Batch SSM response: only SecureString Values are masked."""
+        payload = {"Parameters": [
+            {"Name": "/app/flag", "Type": "String", "Value": "enabled"},
+            {"Name": "/app/pass", "Type": "SecureString", "Value": "secret123456"},
+        ]}
+        out, _ = self._run_mask(json.dumps(payload))
+        data = json.loads(out)
+        assert data["Parameters"][0]["Value"] == "enabled", "String should not be masked"
+        assert "secret123456" not in data["Parameters"][1]["Value"], "SecureString should be masked"
 
     def test_nested_secret_in_list(self):
         payload = {"Parameters": [{"Name": "/a", "Value": "secret1234"}, {"Name": "/b", "Value": "other5678x"}]}

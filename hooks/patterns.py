@@ -55,14 +55,12 @@ BLOCKED_FILES = [
     "oauth-credentials.json",
     ".kaggle/kaggle.json",
     "application-default-credentials.json",
-    # Web3 / Crypto wallet config files (often contain mnemonics or private keys)
-    "hardhat.config.js",
-    "hardhat.config.ts",
-    "truffle-config.js",
-    "foundry.toml",
+    # Web3 / Crypto wallet files that almost certainly contain secrets
     "mnemonic.txt",
     ".secret",
-    "brownie-config.yaml",
+    # NOTE: hardhat.config.js/ts, truffle-config.js, foundry.toml, brownie-config.yaml
+    # are NOT blocked — they are scanned and redacted instead, since modern configs
+    # rarely embed secrets directly (they use process.env or .env files).
 ]
 
 # ── Strategy 2: Secret patterns ─────────────────────────────────────────

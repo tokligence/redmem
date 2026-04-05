@@ -74,11 +74,20 @@ def mask_value(val):
 
 
 def mask_dict(obj):
-    """Recursively mask secret fields in a dict."""
+    """Recursively mask secret fields in a dict.
+
+    Special case: AWS SSM "Value" is only masked when the sibling "Type" field
+    is "SecureString" or absent. Plain String/StringList parameters (feature flags,
+    URLs, etc.) are left unmasked so Claude can use them.
+    """
     if isinstance(obj, dict):
         result = {}
         for k, v in obj.items():
             if k in SECRET_FIELDS:
+                # SSM Type-aware: don't mask Value if Type is a non-secret type
+                if k == "Value" and obj.get("Type") in ("String", "StringList"):
+                    result[k] = v
+                    continue
                 if isinstance(v, str):
                     result[k] = mask_value(v)
                 elif isinstance(v, dict):
