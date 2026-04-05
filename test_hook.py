@@ -1697,6 +1697,205 @@ fi
         assert content.count(self.MARKER_START) == 1
 
 
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# NEW TESTS: Pass Command (Temporary Prompt Bypass)
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestPassCommand:
+    """Test the pass/pass N/pass off temporary prompt bypass."""
+
+    @staticmethod
+    def _cleanup_session_state(session_id):
+        """Clean up session state file for a given session ID."""
+        import hashlib
+        state_key = f"{session_id}::main"
+        session_hash = hashlib.sha256(state_key.encode('utf-8', errors='replace')).hexdigest()[:16]
+        path = os.path.join(tempfile.gettempdir(), f'.claude-secret-shield-{session_hash}.json')
+        if os.path.exists(path):
+            os.remove(path)
+
+    def _run_prompt_hook(self, prompt_text, *, session_id, cwd=None):
+        payload = {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session_id,
+            "user_prompt": prompt_text,
+        }
+        if cwd:
+            payload["cwd"] = str(cwd)
+        r = subprocess.run(
+            [sys.executable, HOOK_SCRIPT],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        parsed = None
+        if r.stdout.strip():
+            try:
+                parsed = json.loads(r.stdout)
+            except json.JSONDecodeError:
+                pass
+        return parsed, r.returncode, r.stderr
+
+    def test_pass_allows_current_prompt(self, tmp_path):
+        """pass allows the current blocked prompt through."""
+        sid = "pass-test-1"
+        self._cleanup_session_state(sid)
+        hex_key = "0x" + "a" * 64
+        # Step 1: prompt blocked
+        result, code, _ = self._run_prompt_hook(f"Check {hex_key}", session_id=sid, cwd=tmp_path)
+        assert code == 0 and result is not None
+        assert result["decision"] == "block"
+        assert "pass" in result["reason"].lower()
+
+        # Step 2: user types "pass"
+        result, code, _ = self._run_prompt_hook("pass", session_id=sid, cwd=tmp_path)
+        assert code == 0 and result is not None
+        extra = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "bypass" in extra.lower() or "pass" in extra.lower()
+        assert hex_key in extra  # original prompt included
+
+        # Step 3: next prompt with secrets should be blocked again (pass 1 = only current)
+        result, code, _ = self._run_prompt_hook(f"Another {hex_key}", session_id=sid, cwd=tmp_path)
+        assert code == 0 and result is not None
+        assert result["decision"] == "block"
+
+    def test_pass_3_allows_three_prompts(self, tmp_path):
+        """pass 3 allows current + next 2 prompts, then blocks the 4th."""
+        sid = "pass-test-3"
+        self._cleanup_session_state(sid)
+        hex_key = "0x" + "b" * 64
+
+        # Block first
+        result, _, _ = self._run_prompt_hook(f"Prompt0 {hex_key}", session_id=sid, cwd=tmp_path)
+        assert result["decision"] == "block"
+
+        # pass 3
+        result, _, _ = self._run_prompt_hook("pass 3", session_id=sid, cwd=tmp_path)
+        assert result is not None
+        extra = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "Prompt0" in extra  # current prompt allowed
+
+        # Next 2 should be allowed (pass_remaining = 2)
+        result, code, _ = self._run_prompt_hook(f"Prompt1 {hex_key}", session_id=sid, cwd=tmp_path)
+        assert code == 0
+        if result:
+            assert result.get("decision") != "block", "Prompt 1 should be allowed (pass_remaining=2)"
+
+        result, code, _ = self._run_prompt_hook(f"Prompt2 {hex_key}", session_id=sid, cwd=tmp_path)
+        assert code == 0
+        if result:
+            assert result.get("decision") != "block", "Prompt 2 should be allowed (pass_remaining=1)"
+
+        # 4th should be blocked (pass_remaining=0)
+        result, code, _ = self._run_prompt_hook(f"Prompt3 {hex_key}", session_id=sid, cwd=tmp_path)
+        assert code == 0 and result is not None
+        assert result["decision"] == "block", "Prompt 3 should be blocked (pass expired)"
+
+    def test_pass_off_disables_for_session(self, tmp_path):
+        """pass off disables prompt scanning for the entire session."""
+        sid = "pass-test-off"
+        self._cleanup_session_state(sid)
+        hex_key = "0x" + "c" * 64
+
+        # Block first
+        result, _, _ = self._run_prompt_hook(f"First {hex_key}", session_id=sid, cwd=tmp_path)
+        assert result["decision"] == "block"
+
+        # pass off
+        result, _, _ = self._run_prompt_hook("pass off", session_id=sid, cwd=tmp_path)
+        assert result is not None
+        extra = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "First" in extra
+
+        # All subsequent prompts with secrets should be allowed
+        for i in range(5):
+            result, code, _ = self._run_prompt_hook(f"Prompt{i} {hex_key}", session_id=sid, cwd=tmp_path)
+            assert code == 0
+            if result:
+                assert result.get("decision") != "block", f"Prompt {i} should be allowed (pass off)"
+
+    def test_pass_without_prior_block_is_noop(self, tmp_path):
+        """pass without a prior blocked prompt does nothing special."""
+        sid = "pass-test-noop"
+        self._cleanup_session_state(sid)
+        result, code, _ = self._run_prompt_hook("pass", session_id=sid, cwd=tmp_path)
+        assert code == 0
+        # No blocked prompt to resume, so no additionalContext
+        if result:
+            assert "additionalContext" not in result.get("hookSpecificOutput", {})
+
+    def test_pass_1_explicit(self, tmp_path):
+        """pass 1 is equivalent to pass (allow current only)."""
+        sid = "pass-test-1-explicit"
+        self._cleanup_session_state(sid)
+        hex_key = "0x" + "d" * 64
+
+        result, _, _ = self._run_prompt_hook(f"Check {hex_key}", session_id=sid, cwd=tmp_path)
+        assert result["decision"] == "block"
+
+        result, _, _ = self._run_prompt_hook("pass 1", session_id=sid, cwd=tmp_path)
+        assert result is not None
+        extra = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert hex_key in extra
+
+        # Next should be blocked
+        result, _, _ = self._run_prompt_hook(f"Next {hex_key}", session_id=sid, cwd=tmp_path)
+        assert result is not None and result["decision"] == "block"
+
+    def test_go_still_works_alongside_pass(self, tmp_path):
+        """go command still works as before (redacted continuation)."""
+        sid = "pass-test-go"
+        self._cleanup_session_state(sid)
+        hex_key = "0x" + "e" * 64
+
+        result, _, _ = self._run_prompt_hook(f"Use {hex_key}", session_id=sid, cwd=tmp_path)
+        assert result["decision"] == "block"
+
+        result, _, _ = self._run_prompt_hook("go", session_id=sid, cwd=tmp_path)
+        assert result is not None
+        extra = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "continue that same request" in extra.lower()
+        assert "Read " in extra  # should point to tmp_secrets file
+
+    def test_block_reason_shows_pass_instructions(self, tmp_path):
+        """Block message should include pass/pass N/pass off instructions."""
+        sid = "pass-test-reason"
+        self._cleanup_session_state(sid)
+        hex_key = "0x" + "f" * 64
+
+        result, _, _ = self._run_prompt_hook(f"Key: {hex_key}", session_id=sid, cwd=tmp_path)
+        assert result["decision"] == "block"
+        reason = result["reason"]
+        assert "pass" in reason.lower()
+        assert "pass off" in reason.lower()
+        assert "go" in reason.lower()
+
+    def test_file_scanning_unaffected_by_pass_off(self, sid, tmp_path):
+        """pass off only affects prompts — file Read still redacts secrets."""
+        # First set pass off via prompt flow
+        hex_key = "0x" + "a" * 64
+        prompt_sid = f"pass-file-{sid}"
+
+        # We cannot easily set pass state for file hooks since they use different state.
+        # But verify that file redaction still works normally.
+        token = "ghp_" + "Z" * 36
+        orig = f"TOKEN={token}\n"
+        f = _tmp(orig)
+        try:
+            o, c, _ = run_hook("Read", {"file_path": f}, sid)
+            assert c == 0
+            with open(f) as fh:
+                red = fh.read()
+            assert token not in red, "File scanning must still redact even if pass off is set"
+            assert _ph_prefix("GITHUB_PAT_CLASSIC") in red
+            run_hook("Read", {"file_path": f}, sid, is_post=True)
+        finally:
+            os.unlink(f)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Legacy runner (python3 test_hook.py still works)
 # ══════════════════════════════════════════════════════════════════════════

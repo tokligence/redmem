@@ -346,9 +346,60 @@ try:
         prompt = get_prompt_text(input_data)
         prompt_dir = get_prompt_storage_dir(input_data)
         state_key = get_prompt_state_key(input_data)
+
+        # ── Helper: build "go" continuation response ────────────────────────
+        def _build_go_response(state):
+            """Build additionalContext for go/pass continuation."""
+            tmp_file = state.get("tmp_file")
+            tmp_context_file = state.get("tmp_context_file")
+            if not tmp_file or not os.path.exists(tmp_file):
+                return None
+            redacted_prompt = ""
+            try:
+                with open(tmp_context_file, "r") as tf:
+                    redacted_prompt = tf.read().strip()
+            except OSError:
+                pass
+            additional_context = (
+                "[claude-secret-shield] The user's previous prompt was blocked because it "
+                "contained secrets. This message is confirmation to continue that same request.\n\n"
+                f"Read {tmp_file} now. That file is safe to read because secrets will be shown "
+                "to you as redacted placeholders.\n\n"
+                "Important: treat those placeholders as the actual values for the task. If you "
+                "need to write files, edit files, or run commands, use the placeholders exactly "
+                "as they appear. claude-secret-shield will automatically restore the real secret "
+                "values before execution when appropriate.\n\n"
+                "Do not ask the user to manually substitute the values or run the command "
+                "themselves just because the secrets are redacted. Continue the original "
+                "request normally using the placeholderized values."
+            )
+            if redacted_prompt:
+                additional_context += f"\n\nPreviously blocked prompt (redacted):\n{redacted_prompt}"
+            return additional_context
+
+        # ── Check "pass" bypass counter ─────────────────────────────────────
+        # pass_remaining: >0 = allow N prompts, -1 = disabled for session, 0/absent = normal
+        state = load_session_state(state_key)
+        pass_remaining = (state or {}).get("pass_remaining", 0)
+
         if prompt:
             redacted_prompt, found_secrets = build_redacted_prompt(prompt)
             if found_secrets:
+                # Check if pass bypass is active
+                if pass_remaining == -1:
+                    # pass off — disabled for session, allow through
+                    debug_log("UserPromptSubmit: pass off active, allowing prompt with secrets")
+                    sys.exit(0)
+                if pass_remaining > 0:
+                    # Decrement pass counter and allow
+                    new_remaining = pass_remaining - 1
+                    if state:
+                        state["pass_remaining"] = new_remaining
+                        save_session_state(state_key, state)
+                    debug_log(f"UserPromptSubmit: pass active ({new_remaining} remaining), allowing")
+                    sys.exit(0)
+
+                # Normal block flow
                 nonce = uuid.uuid4().hex[:12]
                 tmp_file = os.path.join(prompt_dir, f".tmp_secrets.{nonce}.conf")
                 tmp_context_file = os.path.join(prompt_dir, f".tmp_secrets.{nonce}.prompt.txt")
@@ -364,12 +415,14 @@ try:
                     os.chmod(tmp_file, 0o600)
                     os.chmod(tmp_context_file, 0o600)
                     previous_state = load_session_state(state_key)
-                    save_session_state(state_key, {
+                    new_state = {
                         "nonce": nonce,
                         "prompt_dir": prompt_dir,
                         "tmp_file": tmp_file,
                         "tmp_context_file": tmp_context_file,
-                    })
+                        "pass_remaining": 0,
+                    }
+                    save_session_state(state_key, new_state)
                     if previous_state:
                         cleanup_prompt_artifacts_from_paths(
                             previous_state.get("tmp_file"),
@@ -384,7 +437,11 @@ try:
                     reason = (
                         f"🛡️ claude-secret-shield: secret detected ({secret_list}{extra}).\n\n"
                         f"Your prompt has been safely saved. Secrets will be auto-redacted when read.\n\n"
-                        f"Reply \"go\" to continue."
+                        f"Reply:\n"
+                        f"  \"go\"       — continue with secrets auto-redacted\n"
+                        f"  \"pass\"     — allow this prompt as-is (bypass redaction once)\n"
+                        f"  \"pass N\"   — bypass for this + next N-1 prompts\n"
+                        f"  \"pass off\" — disable prompt scanning for this session"
                     )
                 else:
                     reason = (
@@ -398,35 +455,63 @@ try:
                     "reason": reason
                 }))
                 sys.exit(0)
-        # Check if user typed "go" to continue from a blocked prompt
+
+        # ── Check "go" to continue from a blocked prompt ────────────────────
         if prompt.strip().lower() in ("go", "go.", "继续", "continue"):
             state = load_session_state(state_key)
-            tmp_file = state.get("tmp_file") if state else None
-            tmp_context_file = state.get("tmp_context_file") if state else None
-            if tmp_file and os.path.exists(tmp_file):
-                debug_log("UserPromptSubmit: 'go' detected with .tmp_secrets.conf, adding context")
-                redacted_prompt = ""
+            if state:
+                additional_context = _build_go_response(state)
+                if additional_context:
+                    debug_log("UserPromptSubmit: 'go' detected, adding context")
+                    print(json.dumps({
+                        "hookSpecificOutput": {
+                            "hookEventName": "UserPromptSubmit",
+                            "additionalContext": additional_context
+                        }
+                    }))
+                    sys.exit(0)
+
+        # ── Check "pass" / "pass N" / "pass off" command ────────────────────
+        pass_match = re.match(r'^pass(?:\s+(off|\d+))?\s*$', prompt.strip().lower())
+        if pass_match:
+            state = load_session_state(state_key)
+            if state and state.get("tmp_file") and os.path.exists(state.get("tmp_file", "")):
+                arg = pass_match.group(1)
+                if arg == "off":
+                    pass_count = -1  # sentinel: disabled for session
+                    debug_log("UserPromptSubmit: 'pass off' — disabling prompt scanning for session")
+                elif arg:
+                    pass_count = max(int(arg), 1)
+                    debug_log(f"UserPromptSubmit: 'pass {pass_count}' — allowing {pass_count} prompts")
+                else:
+                    pass_count = 1  # pass = pass 1
+                    debug_log("UserPromptSubmit: 'pass' — allowing current prompt")
+
+                # Set pass_remaining for FUTURE prompts (current one is handled by go mechanism)
+                # pass 1 = allow current only → future remaining = 0
+                # pass 3 = allow current + 2 more → future remaining = 2
+                # pass off = disable → future remaining = -1
+                if pass_count == -1:
+                    state["pass_remaining"] = -1
+                else:
+                    state["pass_remaining"] = max(pass_count - 1, 0)
+                save_session_state(state_key, state)
+
+                # Allow current prompt through (same as "go" but without redaction context)
+                additional_context = (
+                    "[claude-secret-shield] The user used 'pass' to bypass secret scanning for this prompt. "
+                    "The original prompt contained values that triggered secret detection, but the user "
+                    "confirmed they are safe to send (e.g. transaction hashes, not private keys).\n\n"
+                    "Proceed with the user's original request. The prompt content will be sent as-is."
+                )
+                # Re-read the original prompt
                 try:
-                    with open(tmp_context_file, "r") as tf:
-                        redacted_prompt = tf.read().strip()
+                    with open(state["tmp_file"], "r") as tf:
+                        original_prompt = tf.read().strip()
+                    additional_context += f"\n\nOriginal prompt:\n{original_prompt}"
                 except OSError:
                     pass
 
-                additional_context = (
-                    "[claude-secret-shield] The user's previous prompt was blocked because it "
-                    "contained secrets. This message is confirmation to continue that same request.\n\n"
-                    f"Read {tmp_file} now. That file is safe to read because secrets will be shown "
-                    "to you as redacted placeholders.\n\n"
-                    "Important: treat those placeholders as the actual values for the task. If you "
-                    "need to write files, edit files, or run commands, use the placeholders exactly "
-                    "as they appear. claude-secret-shield will automatically restore the real secret "
-                    "values before execution when appropriate.\n\n"
-                    "Do not ask the user to manually substitute the values or run the command "
-                    "themselves just because the secrets are redacted. Continue the original "
-                    "request normally using the placeholderized values."
-                )
-                if redacted_prompt:
-                    additional_context += f"\n\nPreviously blocked prompt (redacted):\n{redacted_prompt}"
                 print(json.dumps({
                     "hookSpecificOutput": {
                         "hookEventName": "UserPromptSubmit",
