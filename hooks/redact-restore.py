@@ -1152,32 +1152,61 @@ try:
 
         # Strategy 2: Wrap cloud secret manager commands with masking script
         MASK_SCRIPT = os.path.join(_SCRIPT_DIR, "mask-output.py")
-        mask_cmd = None
 
-        # AWS Secrets Manager: get-secret-value, batch-get-secret-value
-        if re.search(r'\baws\s+secretsmanager\s+(?:get-secret-value|batch-get-secret-value)\b', command):
-            mask_cmd = f" | python3 {MASK_SCRIPT}"
-        # AWS SSM Parameter Store: get-parameter, get-parameters, get-parameters-by-path
-        elif re.search(r'\baws\s+ssm\s+get-parameters?\b', command) or \
-             re.search(r'\baws\s+ssm\s+get-parameters-by-path\b', command):
-            mask_cmd = f" | python3 {MASK_SCRIPT}"
-        # AWS KMS: decrypt
-        elif re.search(r'\baws\s+kms\s+decrypt\b', command):
-            mask_cmd = f" | python3 {MASK_SCRIPT}"
-        # GCP Secret Manager: gcloud secrets versions access
+        # Detect secret manager commands (allow --profile and other global flags between cli name and subcommand)
+        is_secret_cmd = False
+        mask_mode = ""  # default JSON mode
+        if re.search(r'\baws\s+(?:\S+\s+)*secretsmanager\s+(?:get-secret-value|batch-get-secret-value|get-random-password)\b', command):
+            is_secret_cmd = True
+        elif re.search(r'\baws\s+(?:\S+\s+)*ssm\s+(?:get-parameters?|get-parameters-by-path|get-parameter-history)\b', command):
+            is_secret_cmd = True
+        elif re.search(r'\baws\s+(?:\S+\s+)*kms\s+decrypt\b', command):
+            is_secret_cmd = True
         elif re.search(r'\bgcloud\s+secrets\s+versions\s+access\b', command):
-            mask_cmd = f" | python3 {MASK_SCRIPT} --mode=raw"
-        # Azure Key Vault: az keyvault secret show, az keyvault secret list
-        elif re.search(r'\baz\s+keyvault\s+secret\s+show\b', command):
-            mask_cmd = f" | python3 {MASK_SCRIPT}"
+            is_secret_cmd = True
+            if "--format=" not in command:
+                mask_mode = " --mode=raw"
+        elif re.search(r'\baz\s+keyvault\s+secret\s+(?:show|download)\b', command):
+            is_secret_cmd = True
+        elif re.search(r'\bvault\s+(?:kv\s+get|read|kv\s+list)\b', command):
+            is_secret_cmd = True
 
-        if mask_cmd:
+        if is_secret_cmd:
+            # Don't double-wrap
+            if MASK_SCRIPT in command:
+                sys.exit(0)
+
+            # DENY if command has pipes, redirects, or command substitution — these can
+            # bypass masking by transforming or exfiltrating output before the mask runs.
+            has_pipe = bool(re.search(r'(?<!\|)\|(?!\|)', command))  # | but not ||
+            has_redirect = bool(re.search(r'[^2]?>{1,2}\s', command) or re.search(r'\btee\b', command))
+            has_subshell = bool(re.search(r'\$\(', command) or '`' in command)
+
+            if has_pipe:
+                deny(
+                    "BLOCKED: This command reads cloud secrets but contains a pipe (|). "
+                    "Remove all pipes and run the secret manager command directly — "
+                    "claude-secret-shield will automatically mask sensitive values in the output. "
+                    "You can process the masked output afterwards."
+                )
+            if has_redirect:
+                deny(
+                    "BLOCKED: This command reads cloud secrets but contains output redirection (> or tee). "
+                    "Remove all redirections and run the secret manager command directly — "
+                    "secret values must not be written to disk unmasked."
+                )
+            if has_subshell:
+                deny(
+                    "BLOCKED: This command reads cloud secrets inside a command substitution ($() or backticks). "
+                    "Run the secret manager command directly instead — "
+                    "claude-secret-shield will automatically mask sensitive values in the output."
+                )
+
+            # Safe to wrap with masking pipe
             updated = dict(tool_input)
-            # Don't double-wrap if already piped to mask script
-            if MASK_SCRIPT not in command:
-                updated["command"] = command + mask_cmd
-                debug_log(f"Bash: wrapped secret manager command with masking")
-                allow_with_update(updated)
+            updated["command"] = command + f" | python3 {MASK_SCRIPT}{mask_mode}"
+            debug_log(f"Bash: wrapped secret manager command with masking")
+            allow_with_update(updated)
 
         # Strategy 3: Restore placeholders in bash commands
         mapping = load_mapping()

@@ -2253,6 +2253,28 @@ class TestMaskOutput:
         assert rc == 0
 
     # ── Nested structures ───────────────────────────────────────────────
+
+    def test_mask_empty_string(self):
+        out, _ = self._run_mask('{"SecretString": ""}')
+        data = json.loads(out)
+        assert data["SecretString"] == "<empty>", "Empty secret should show <empty>"
+
+    def test_mask_random_password(self):
+        out, _ = self._run_mask('{"RandomPassword": "MyR@ndomP@ss123!"}')
+        data = json.loads(out)
+        assert "MyR@ndomP@ss123!" not in data["RandomPassword"]
+        assert data["RandomPassword"][:3] == "MyR"
+
+    def test_mask_plaintext_capital_p(self):
+        out, _ = self._run_mask('{"Plaintext": "decrypted-secret-value"}')
+        data = json.loads(out)
+        assert "decrypted-secret-value" not in data["Plaintext"]
+
+    def test_mask_vault_data_field(self):
+        out, _ = self._run_mask('{"data": {"password": "vaultpass123", "username": "admin"}}')
+        data = json.loads(out)
+        assert "vaultpass123" not in json.dumps(data)
+
     def test_nested_secret_in_list(self):
         payload = {"Parameters": [{"Name": "/a", "Value": "secret1234"}, {"Name": "/b", "Value": "other5678x"}]}
         out, _ = self._run_mask(json.dumps(payload))
@@ -2318,6 +2340,102 @@ class TestSecretManagerBashWrapping:
         o, c, _ = run_hook("Bash", {"command": "ls -la"}, sid)
         assert c == 0
         assert o is None
+
+
+    # ── CRITICAL: Deny pipes/redirects/subshells ────────────────────────
+    def test_pipe_denied(self, sid):
+        """Secret manager command with pipe should be denied."""
+        o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id x | jq .SecretString"}, sid)
+        assert c == 0 and o is not None
+        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "pipe" in o["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    def test_redirect_denied(self, sid):
+        """Secret manager command with > redirect should be denied."""
+        o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id x > /tmp/out.json"}, sid)
+        assert c == 0 and o is not None
+        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "redirect" in o["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    def test_tee_denied(self, sid):
+        """Secret manager command with tee should be denied."""
+        o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id x | tee /tmp/out.json"}, sid)
+        assert c == 0 and o is not None
+        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_command_substitution_denied(self, sid):
+        """Secret manager command inside $() should be denied."""
+        o, c, _ = run_hook("Bash", {"command": "echo $(aws secretsmanager get-secret-value --secret-id x)"}, sid)
+        assert c == 0 and o is not None
+        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "substitution" in o["hookSpecificOutput"]["permissionDecisionReason"].lower()
+
+    def test_backtick_substitution_denied(self, sid):
+        """Secret manager command inside backticks should be denied."""
+        o, c, _ = run_hook("Bash", {"command": "echo `aws secretsmanager get-secret-value --secret-id x`"}, sid)
+        assert c == 0 and o is not None
+        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # ── AWS --profile flag ──────────────────────────────────────────────
+    def test_aws_with_profile_flag_wrapped(self, sid):
+        """aws --profile prod secretsmanager should still be detected."""
+        o, c, _ = run_hook("Bash", {"command": "aws --profile prod secretsmanager get-secret-value --secret-id x"}, sid)
+        assert c == 0 and o is not None
+        assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
+
+    def test_aws_with_region_flag_wrapped(self, sid):
+        """aws --region us-east-1 secretsmanager should still be detected."""
+        o, c, _ = run_hook("Bash", {"command": "aws --region us-east-1 secretsmanager get-secret-value --secret-id x"}, sid)
+        assert c == 0 and o is not None
+        assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
+
+    # ── Additional AWS commands ─────────────────────────────────────────
+    def test_aws_get_random_password_wrapped(self, sid):
+        """aws secretsmanager get-random-password should be wrapped."""
+        o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-random-password"}, sid)
+        assert c == 0 and o is not None
+        assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
+
+    def test_aws_ssm_get_parameter_history_wrapped(self, sid):
+        """aws ssm get-parameter-history should be wrapped."""
+        o, c, _ = run_hook("Bash", {"command": "aws ssm get-parameter-history --name /prod/key"}, sid)
+        assert c == 0 and o is not None
+        assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
+
+    # ── HashiCorp Vault ─────────────────────────────────────────────────
+    def test_vault_kv_get_wrapped(self, sid):
+        """vault kv get should be wrapped."""
+        o, c, _ = run_hook("Bash", {"command": "vault kv get secret/myapp/config"}, sid)
+        assert c == 0 and o is not None
+        assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
+
+    def test_vault_read_wrapped(self, sid):
+        """vault read should be wrapped."""
+        o, c, _ = run_hook("Bash", {"command": "vault read secret/data/myapp"}, sid)
+        assert c == 0 and o is not None
+        assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
+
+    def test_vault_kv_get_with_pipe_denied(self, sid):
+        """vault kv get with pipe should be denied."""
+        o, c, _ = run_hook("Bash", {"command": "vault kv get secret/x | jq .data"}, sid)
+        assert c == 0 and o is not None
+        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # ── GCP with --format flag ──────────────────────────────────────────
+    def test_gcloud_with_format_json_uses_json_mode(self, sid):
+        """gcloud with --format=json should NOT use --mode=raw."""
+        o, c, _ = run_hook("Bash", {"command": "gcloud secrets versions access latest --secret=x --format=json"}, sid)
+        assert c == 0 and o is not None
+        cmd = o["hookSpecificOutput"]["updatedInput"]["command"]
+        assert "mask-output.py" in cmd
+        assert "--mode=raw" not in cmd
+
+    # ── Azure additional commands ───────────────────────────────────────
+    def test_azure_keyvault_download_wrapped(self, sid):
+        """az keyvault secret download should be wrapped."""
+        o, c, _ = run_hook("Bash", {"command": "az keyvault secret download --vault-name x --name y -f /dev/stdout"}, sid)
+        assert c == 0 and o is not None
+        assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
 
     def test_no_double_wrap(self, sid):
         """If command already contains mask-output.py, don't wrap again."""

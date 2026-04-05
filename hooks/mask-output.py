@@ -23,16 +23,23 @@ SECRET_FIELDS = {
     # AWS Secrets Manager
     "SecretString",
     "SecretBinary",
+    "RandomPassword",   # get-random-password
     # AWS SSM Parameter Store
     "Value",
+    # AWS KMS
+    "Plaintext",        # decrypt (capital P)
+    "plaintext",
     # Azure Key Vault
     "value",
+    # HashiCorp Vault
+    "data",             # vault kv get
     # General
     "secret",
     "password",
     "token",
     "key",
-    "plaintext",  # AWS KMS decrypt
+    "PrivateKey",
+    "privateKey",
 }
 
 # Fields that are containers — mask values inside them, not the field itself
@@ -56,6 +63,8 @@ def mask_value(val):
     if not isinstance(val, str):
         return "***"
     n = len(val)
+    if n == 0:
+        return "<empty>"
     if n <= 3:
         return "*" * n
     elif n <= 6:
@@ -69,11 +78,18 @@ def mask_dict(obj):
     if isinstance(obj, dict):
         result = {}
         for k, v in obj.items():
-            if k in SECRET_FIELDS and isinstance(v, str):
-                result[k] = mask_value(v)
-            elif k in SECRET_FIELDS and isinstance(v, dict):
-                # SecretString could be a JSON string that was parsed
-                result[k] = mask_value(json.dumps(v))
+            if k in SECRET_FIELDS:
+                if isinstance(v, str):
+                    result[k] = mask_value(v)
+                elif isinstance(v, dict):
+                    # SecretString could be a JSON string that was parsed
+                    result[k] = mask_value(json.dumps(v))
+                elif isinstance(v, (int, float, bool)):
+                    result[k] = "***"
+                elif isinstance(v, list):
+                    result[k] = mask_value(json.dumps(v))
+                else:
+                    result[k] = "***"
             else:
                 result[k] = mask_dict(v)
         return result
