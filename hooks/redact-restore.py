@@ -1150,6 +1150,35 @@ try:
             if re.search(rf"<\s*[^\s]*{escaped}", command):
                 deny(f"BLOCKED: command reads '{pattern}' which is in the secret files block list.")
 
+        # Strategy 2: Wrap cloud secret manager commands with masking script
+        MASK_SCRIPT = os.path.join(_SCRIPT_DIR, "mask-output.py")
+        mask_cmd = None
+
+        # AWS Secrets Manager: get-secret-value, batch-get-secret-value
+        if re.search(r'\baws\s+secretsmanager\s+(?:get-secret-value|batch-get-secret-value)\b', command):
+            mask_cmd = f" | python3 {MASK_SCRIPT}"
+        # AWS SSM Parameter Store: get-parameter, get-parameters, get-parameters-by-path
+        elif re.search(r'\baws\s+ssm\s+get-parameters?\b', command) or \
+             re.search(r'\baws\s+ssm\s+get-parameters-by-path\b', command):
+            mask_cmd = f" | python3 {MASK_SCRIPT}"
+        # AWS KMS: decrypt
+        elif re.search(r'\baws\s+kms\s+decrypt\b', command):
+            mask_cmd = f" | python3 {MASK_SCRIPT}"
+        # GCP Secret Manager: gcloud secrets versions access
+        elif re.search(r'\bgcloud\s+secrets\s+versions\s+access\b', command):
+            mask_cmd = f" | python3 {MASK_SCRIPT} --mode=raw"
+        # Azure Key Vault: az keyvault secret show, az keyvault secret list
+        elif re.search(r'\baz\s+keyvault\s+secret\s+show\b', command):
+            mask_cmd = f" | python3 {MASK_SCRIPT}"
+
+        if mask_cmd:
+            updated = dict(tool_input)
+            # Don't double-wrap if already piped to mask script
+            if MASK_SCRIPT not in command:
+                updated["command"] = command + mask_cmd
+                debug_log(f"Bash: wrapped secret manager command with masking")
+                allow_with_update(updated)
+
         # Strategy 3: Restore placeholders in bash commands
         mapping = load_mapping()
         if mapping.get("placeholder_to_secret"):

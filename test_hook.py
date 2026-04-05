@@ -2126,6 +2126,210 @@ class TestPassCommand:
             os.unlink(f)
 
 
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# NEW TESTS: Cloud Secret Manager Masking
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestMaskOutput:
+    """Unit tests for mask-output.py masking logic."""
+
+    MASK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "mask-output.py")
+
+    def _run_mask(self, input_text, extra_args=None):
+        cmd = [sys.executable, self.MASK_SCRIPT]
+        if extra_args:
+            cmd.extend(extra_args)
+        r = subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=10)
+        return r.stdout.strip(), r.returncode
+
+    # ── Mask value edge cases ───────────────────────────────────────────
+    def test_mask_1_char(self):
+        out, _ = self._run_mask('{"SecretString": "a"}')
+        data = json.loads(out)
+        assert data["SecretString"] == "*", "1-char secret should be fully masked"
+
+    def test_mask_2_chars(self):
+        out, _ = self._run_mask('{"SecretString": "ab"}')
+        data = json.loads(out)
+        assert data["SecretString"] == "**"
+
+    def test_mask_3_chars(self):
+        out, _ = self._run_mask('{"SecretString": "abc"}')
+        data = json.loads(out)
+        assert data["SecretString"] == "***"
+
+    def test_mask_4_chars(self):
+        out, _ = self._run_mask('{"SecretString": "abcd"}')
+        data = json.loads(out)
+        assert data["SecretString"] == "a**d"
+        assert len(data["SecretString"]) == 4, "Length must be preserved"
+
+    def test_mask_5_chars(self):
+        out, _ = self._run_mask('{"SecretString": "abcde"}')
+        data = json.loads(out)
+        assert data["SecretString"] == "a***e"
+        assert len(data["SecretString"]) == 5
+
+    def test_mask_6_chars(self):
+        out, _ = self._run_mask('{"SecretString": "abcdef"}')
+        data = json.loads(out)
+        assert data["SecretString"] == "a****f"
+        assert len(data["SecretString"]) == 6
+
+    def test_mask_7_chars(self):
+        out, _ = self._run_mask('{"SecretString": "abcdefg"}')
+        data = json.loads(out)
+        assert data["SecretString"] == "abc*efg"
+        assert len(data["SecretString"]) == 7
+
+    def test_mask_20_chars(self):
+        secret = "abcdefghijklmnopqrst"
+        out, _ = self._run_mask(json.dumps({"SecretString": secret}))
+        data = json.loads(out)
+        masked = data["SecretString"]
+        assert masked[:3] == "abc", "First 3 chars visible"
+        assert masked[-3:] == "rst", "Last 3 chars visible"
+        assert masked[3:-3] == "*" * 14, "Middle chars masked"
+        assert len(masked) == 20, "Length preserved"
+
+    # ── AWS Secrets Manager fields ──────────────────────────────────────
+    def test_aws_secret_string_masked(self):
+        payload = {"ARN": "arn:aws:secretsmanager:us-east-1:123:secret:mykey", "Name": "mykey", "SecretString": "supersecretvalue123"}
+        out, rc = self._run_mask(json.dumps(payload))
+        assert rc == 0
+        data = json.loads(out)
+        assert data["Name"] == "mykey", "Non-secret fields untouched"
+        assert data["ARN"].startswith("arn:"), "ARN untouched"
+        assert "supersecretvalue123" not in data["SecretString"]
+        assert data["SecretString"][:3] == "sup"
+        assert data["SecretString"][-3:] == "123"
+
+    def test_aws_secret_binary_masked(self):
+        payload = {"SecretBinary": "base64encodeddata=="}
+        out, _ = self._run_mask(json.dumps(payload))
+        data = json.loads(out)
+        assert "base64encodeddata==" not in data["SecretBinary"]
+
+    # ── AWS SSM Parameter Store ─────────────────────────────────────────
+    def test_aws_ssm_parameter_value_masked(self):
+        payload = {"Parameter": {"Name": "/prod/db/password", "Type": "SecureString", "Value": "MyDatabasePassword123"}}
+        out, _ = self._run_mask(json.dumps(payload))
+        data = json.loads(out)
+        assert data["Parameter"]["Name"] == "/prod/db/password"
+        assert "MyDatabasePassword123" not in data["Parameter"]["Value"]
+        assert data["Parameter"]["Value"][:3] == "MyD"
+
+    # ── GCP raw mode ────────────────────────────────────────────────────
+    def test_gcp_raw_mode(self):
+        out, _ = self._run_mask("my-super-secret-value", ["--mode=raw"])
+        assert out[:3] == "my-"
+        assert out[-3:] == "lue"
+        assert "*" in out
+        assert "my-super-secret-value" not in out
+
+    def test_gcp_raw_short(self):
+        out, _ = self._run_mask("abc", ["--mode=raw"])
+        assert out == "***"
+
+    # ── Azure Key Vault ─────────────────────────────────────────────────
+    def test_azure_keyvault_value_masked(self):
+        payload = {"id": "https://myvault.vault.azure.net/secrets/mykey/abc123", "value": "AzureSecretValue!@#"}
+        out, _ = self._run_mask(json.dumps(payload))
+        data = json.loads(out)
+        assert data["id"].startswith("https://"), "ID untouched"
+        assert "AzureSecretValue" not in data["value"]
+
+    # ── Non-JSON fallback ───────────────────────────────────────────────
+    def test_non_json_fallback(self):
+        out, _ = self._run_mask("plain-text-secret-value")
+        assert out[:3] == "pla"
+        assert out[-3:] == "lue"
+        assert "*" in out
+
+    def test_empty_input(self):
+        out, rc = self._run_mask("")
+        assert rc == 0
+
+    # ── Nested structures ───────────────────────────────────────────────
+    def test_nested_secret_in_list(self):
+        payload = {"Parameters": [{"Name": "/a", "Value": "secret1234"}, {"Name": "/b", "Value": "other5678x"}]}
+        out, _ = self._run_mask(json.dumps(payload))
+        data = json.loads(out)
+        assert "secret1234" not in json.dumps(data)
+        assert "other5678x" not in json.dumps(data)
+        assert data["Parameters"][0]["Name"] == "/a"
+
+
+class TestSecretManagerBashWrapping:
+    """E2E tests for cloud secret manager command wrapping."""
+
+    MASK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "mask-output.py")
+
+    def test_aws_secretsmanager_wrapped(self, sid):
+        """aws secretsmanager get-secret-value should be wrapped with mask script."""
+        o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id mykey"}, sid)
+        assert c == 0 and o is not None
+        updated_cmd = o["hookSpecificOutput"]["updatedInput"]["command"]
+        assert "mask-output.py" in updated_cmd
+        assert "aws secretsmanager get-secret-value" in updated_cmd
+
+    def test_aws_ssm_get_parameter_wrapped(self, sid):
+        """aws ssm get-parameter should be wrapped."""
+        o, c, _ = run_hook("Bash", {"command": "aws ssm get-parameter --name /prod/db/pass --with-decryption"}, sid)
+        assert c == 0 and o is not None
+        assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
+
+    def test_aws_ssm_get_parameters_wrapped(self, sid):
+        """aws ssm get-parameters should be wrapped."""
+        o, c, _ = run_hook("Bash", {"command": "aws ssm get-parameters --names /a /b"}, sid)
+        assert c == 0 and o is not None
+        assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
+
+    def test_aws_kms_decrypt_wrapped(self, sid):
+        """aws kms decrypt should be wrapped."""
+        o, c, _ = run_hook("Bash", {"command": "aws kms decrypt --ciphertext-blob fileb://enc.dat"}, sid)
+        assert c == 0 and o is not None
+        assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
+
+    def test_gcloud_secrets_wrapped_with_raw_mode(self, sid):
+        """gcloud secrets versions access should be wrapped with --mode=raw."""
+        o, c, _ = run_hook("Bash", {"command": "gcloud secrets versions access latest --secret=mykey"}, sid)
+        assert c == 0 and o is not None
+        cmd = o["hookSpecificOutput"]["updatedInput"]["command"]
+        assert "mask-output.py" in cmd
+        assert "--mode=raw" in cmd
+
+    def test_azure_keyvault_wrapped(self, sid):
+        """az keyvault secret show should be wrapped."""
+        o, c, _ = run_hook("Bash", {"command": "az keyvault secret show --vault-name myvault --name mykey"}, sid)
+        assert c == 0 and o is not None
+        assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
+
+    def test_normal_aws_command_not_wrapped(self, sid):
+        """Non-secret AWS commands should not be wrapped."""
+        o, c, _ = run_hook("Bash", {"command": "aws s3 ls"}, sid)
+        assert c == 0
+        assert o is None, "aws s3 ls should not be wrapped"
+
+    def test_normal_bash_not_wrapped(self, sid):
+        """Regular bash commands should not be wrapped."""
+        o, c, _ = run_hook("Bash", {"command": "ls -la"}, sid)
+        assert c == 0
+        assert o is None
+
+    def test_no_double_wrap(self, sid):
+        """If command already contains mask-output.py, don't wrap again."""
+        cmd = f"aws secretsmanager get-secret-value --secret-id x | python3 {self.MASK_SCRIPT}"
+        o, c, _ = run_hook("Bash", {"command": cmd}, sid)
+        assert c == 0
+        # Should not be wrapped again (either None output or same command)
+        if o:
+            updated = o.get("hookSpecificOutput", {}).get("updatedInput", {}).get("command", "")
+            assert updated.count("mask-output.py") <= 1, "Should not double-wrap"
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Legacy runner (python3 test_hook.py still works)
 # ══════════════════════════════════════════════════════════════════════════
