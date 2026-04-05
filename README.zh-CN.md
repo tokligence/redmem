@@ -8,7 +8,7 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/tokligence/claude-secret-shield?style=social)](https://github.com/tokligence/claude-secret-shield)
 
-![claude-secret-shield 效果图](docs/example.png)
+![claude-secret-shield 效果图](docs/sn.png)
 
 ## 安装
 
