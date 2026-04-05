@@ -10,6 +10,14 @@ If you find this useful, please give it a star to help others discover it.
 
 ![claude-secret-shield in action](docs/example.png)
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tokligence/claude-secret-shield/main/install.sh | sh
+```
+
+Restart Claude Code after installing. **Prerequisites:** Python 3.6+, `jq`. Optional: `pip3 install cryptography` for encrypted mapping storage.
+
 ## Features
 
 - **164 secret patterns** -- OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, database URLs, private keys, JWTs, and 90+ more

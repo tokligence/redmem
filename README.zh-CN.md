@@ -10,6 +10,14 @@
 
 ![claude-secret-shield 效果图](docs/example.png)
 
+## 安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tokligence/claude-secret-shield/main/install.sh | sh
+```
+
+安装后重启 Claude Code。**前置条件：** Python 3.6+、`jq`。可选：`pip3 install cryptography` 启用加密存储。
+
 ## 功能特性
 
 - **183 种秘密模式** -- 涵盖 OpenAI、Anthropic、AWS、GitHub、Stripe、Slack、数据库连接串、私钥、JWT、Web3 钱包等 100+ 种类型
@@ -55,26 +63,6 @@
 **第 3 层 -- 自动还原（Auto Restore）：** 当 Claude 写入或编辑文件时，hook 会静默地将所有占位符替换回真实的秘密值。磁盘上的代码始终保持真实凭据。Claude 对此毫无感知。
 
 ## 快速开始
-
-### 安装（一条命令）
-
-```bash
-git clone https://github.com/tokligence/claude-secret-shield.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/install.sh && rm -rf /tmp/claude-redact-install
-```
-
-或者直接告诉 Claude Code：*"Install secret redaction from https://github.com/tokligence/claude-secret-shield"*
-
-安装后请重启 Claude Code。
-
-**前置条件：** Python 3.6+、`jq`
-
-**推荐：** 安装 `cryptography` 以启用加密存储映射文件：
-
-```bash
-pip3 install cryptography
-```
-
-如果不安装，映射文件将以明文存储（已限制文件权限，但未加密）。
 
 ### 卸载
 
