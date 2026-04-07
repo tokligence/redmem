@@ -20,9 +20,9 @@ curl -fsSL https://raw.githubusercontent.com/tokligence/claude-secret-shield/mai
 
 ## 功能特性
 
-- **183 种秘密模式** -- 涵盖 OpenAI、Anthropic、AWS、GitHub、Stripe、Slack、数据库连接串、私钥、JWT、Web3 钱包等 100+ 种类型
+- **205 种秘密模式** -- 涵盖 OpenAI、Anthropic、AWS、GitHub、Stripe、Slack、数据库连接串、私钥、JWT、Web3 钱包等 100+ 种类型
 - **Web3 钱包保护** -- ETH/EVM 私钥、BIP39 助记词、比特币 WIF、Solana、Infura/Alchemy/Etherscan RPC URL
-- **48 种文件类型拦截** -- `.env`、`credentials.json`、`id_rsa`、`.pem`、`.p12`、`.pfx` 等
+- **42 种文件类型拦截** -- `.env`、`credentials.json`、`id_rsa`、`.pem`、`.p12`、`.pfx` 等
 - **用户输入扫描** -- 在 prompt 中粘贴秘密时自动拦截，防止发送到 API
 - **自动还原** -- Claude 写入代码时，占位符自动还原为真实值
 - **自动 gitignore** -- `.tmp_secrets.conf` 在首次读取时自动添加到 `.gitignore`
@@ -59,7 +59,7 @@ curl -fsSL https://raw.githubusercontent.com/tokligence/claude-secret-shield/mai
 
 **第 1 层 -- 文件拦截（Block List）：** 某些文件不应该被读取。当 Claude 尝试读取 `.env`、`credentials.json`、`id_rsa` 或其他 48 种被拦截的文件类型时，hook 会直接拒绝读取。Claude 会收到一条错误信息，建议使用其他替代方式。
 
-**第 2 层 -- 模式脱敏（Pattern Redaction）：** 对于其他所有文件，hook 会用 183 个正则表达式模式扫描内容。匹配到的秘密值会被替换为确定性的占位符，如 `{{OPENAI_KEY_a1b2c3d4}}`。Claude 只能看到占位符，永远看不到真实的 key。
+**第 2 层 -- 模式脱敏（Pattern Redaction）：** 对于其他所有文件，hook 会用 205 个正则表达式模式扫描内容。匹配到的秘密值会被替换为确定性的占位符，如 `{{OPENAI_KEY_a1b2c3d4}}`。Claude 只能看到占位符，永远看不到真实的 key。
 
 **第 3 层 -- 自动还原（Auto Restore）：** 当 Claude 写入或编辑文件时，hook 会静默地将所有占位符替换回真实的秘密值。磁盘上的代码始终保持真实凭据。Claude 对此毫无感知。
 
@@ -146,7 +146,7 @@ Claude Code 发起工具调用 (Read / Write / Edit / Bash)
 这是关键的设计洞察。Claude Code 内部会追踪哪些文件已经被"读取"过。如果一次 Read 被拒绝或重定向，Claude 之后就无法对该文件执行 Write 或 Edit（会报"file has not been read yet"错误）。解决方案如下：
 
 1. `PreToolUse` 在 `Read(/path/to/config.py)` 时触发
-2. Hook 读取文件，用 183 个模式扫描内容
+2. Hook 读取文件，用 205 个模式扫描内容
 3. Hook 将原始文件备份到 `/tmp/.claude-backup-{session}/`
 4. Hook 用脱敏后的内容就地覆盖文件（保留时间戳）
 5. Hook 返回 0（放行）-- Claude 正常读取到脱敏后的文件
@@ -161,7 +161,7 @@ Claude Code 发起工具调用 (Read / Write / Edit / Bash)
 
 ## 秘密模式
 
-183 个模式按类别组织：
+205 个模式按类别组织：
 
 | 类别 | 数量 | 示例 |
 |------|-----:|------|
@@ -178,7 +178,7 @@ Claude Code 发起工具调用 (Read / Write / Edit / Bash)
 | 私钥 / Token | 2 | PEM 私钥块、JWT token |
 | 通用模式 | 3 | `api_key=...`、`password=...`、env 格式中的 base64 秘密值 |
 | Web3 / 加密货币 | 11 | 以太坊私钥、BIP39 助记词、比特币 WIF、Solana、Infura、Alchemy、Etherscan、Ankr、QuickNode |
-| **合计** | **183** | |
+| **合计** | **205** | |
 
 ## 安全范围
 
@@ -190,8 +190,8 @@ Claude Code 发起工具调用 (Read / Write / Edit / Bash)
 
 | 威胁 | 是否防护？ | 方式 |
 |------|-----------|------|
-| Claude 在代码中看到你的 API key | 是 | 基于模式的脱敏（183 种模式） |
-| Claude 读取 .env / credentials 文件 | 是 | 文件拦截（48 种文件类型） |
+| Claude 在代码中看到你的 API key | 是 | 基于模式的脱敏（205 种模式） |
+| Claude 读取 .env / credentials 文件 | 是 | 文件拦截（42 种文件类型） |
 | Claude 在连接串中看到数据库密码 | 是 | 模式匹配（MongoDB、PostgreSQL、MySQL、Redis URL） |
 | Claude 看到私钥（RSA、Ed25519 等） | 是 | PEM 头部检测 + 文件拦截 |
 | 映射文件从磁盘被窃取 | 是 | Fernet 静态加密 |
@@ -208,7 +208,7 @@ Claude Code 发起工具调用 (Read / Write / Edit / Bash)
 | hook 运行时的内存转储 | **否** | 脱敏过程中秘密值会短暂存在于 RAM 中 |
 | 提示注入攻击让 Claude 泄露秘密值 | **否** | 这是应用层攻击，不是文件读取攻击 |
 | 二进制文件中的秘密值（编译代码、图片） | **否** | 二进制文件会被跳过 |
-| 未覆盖格式中的秘密值 | **否** | 只能检测内置的 183 种模式 + 自定义模式 |
+| 未覆盖格式中的秘密值 | **否** | 只能检测内置的 205 种模式 + 自定义模式 |
 
 ### 结论
 
@@ -286,7 +286,7 @@ cp ~/.claude/hooks/custom-patterns.example.py ~/.claude/hooks/custom-patterns.py
 ~/.claude/
   hooks/
     redact-restore.py          # 主 hook 脚本
-    patterns.py                # 183 种秘密模式（安装时更新）
+    patterns.py                # 205 种秘密模式（安装时更新）
     custom-patterns.py         # 你的自定义模式（安装时不会覆盖）
     custom-patterns.example.py # 自定义模式示例文件
   settings.json                # Hook 注册（PreToolUse + PostToolUse + SessionEnd）

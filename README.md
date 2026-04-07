@@ -20,9 +20,9 @@ Restart Claude Code after installing. **Prerequisites:** Python 3.6+, `jq`. Opti
 
 ## Features
 
-- **183 secret patterns** -- OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, database URLs, private keys, JWTs, Web3 wallets, and 100+ more
+- **205 secret patterns** -- OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, database URLs, private keys, JWTs, Web3 wallets, and 100+ more
 - **Web3 wallet protection** -- ETH/EVM private keys, BIP39 mnemonics, Bitcoin WIF, Solana, Infura/Alchemy/Etherscan URLs
-- **48 blocked file types** -- `.env`, `credentials.json`, `id_rsa`, `.pem`, `hardhat.config.*`, `mnemonic.txt`, and more
+- **42 blocked file types** -- `.env`, `credentials.json`, `id_rsa`, `.pem`, `hardhat.config.*`, `mnemonic.txt`, and more
 - **Prompt scanning** -- blocks secrets pasted directly in user prompts before they reach the API
 - **Temporary bypass** -- `pass` / `pass N` / `pass off` to allow non-secret values (e.g., tx hashes) through
 - **Automatic restore** -- secrets restored to real values when Claude writes code
@@ -66,11 +66,11 @@ the message. You have several options:
 - `pass off` — disable prompt scanning for this session
 
 **Layer 1 -- Block List:** Some files should never be read at all. When Claude tries
-to read `.env`, `credentials.json`, `id_rsa`, or any of the 48 blocked file types,
+to read `.env`, `credentials.json`, `id_rsa`, or any of the 42 blocked file types,
 the hook denies the read entirely. Claude gets an error message suggesting alternatives.
 
 **Layer 2 -- Pattern Redaction:** For every other file, the hook scans the content
-against 183 regex patterns. Any match is replaced with a deterministic placeholder
+against 205 regex patterns. Any match is replaced with a deterministic placeholder
 like `{{OPENAI_KEY_a1b2c3d4}}`. Claude sees the placeholder, never the real key.
 
 **Layer 3 -- Auto Restore:** When Claude writes or edits a file, the hook
@@ -183,7 +183,7 @@ If a Read is denied or redirected, Claude cannot Write or Edit that file later (
 with "file has not been read yet"). The solution:
 
 1. `PreToolUse` fires for `Read(/path/to/config.py)`
-2. Hook reads the file, scans against 183 patterns
+2. Hook reads the file, scans against 205 patterns
 3. Hook backs up the original to `/tmp/.claude-backup-{session}/`
 4. Hook overwrites the file in-place with redacted content (preserving timestamps)
 5. Hook exits 0 (allow) -- Claude reads the redacted file normally
@@ -204,12 +204,13 @@ backups automatically. No manual intervention needed.
 For the complete pattern catalog with prefixes, examples, and selection criteria, see [docs/PATTERNS.md](docs/PATTERNS.md).
 
 
-183 patterns organized by category:
+205 patterns organized by category:
 
 | Category | Count | Examples |
 |----------|------:|---------|
 | AI / ML Providers | 12 | OpenAI, Anthropic, Groq, Perplexity, Hugging Face, Replicate, DeepSeek, GCP/Gemini |
 | Cloud Providers | 9 | AWS (access key, secret, session token), Azure, DigitalOcean, Alibaba Cloud, Tencent |
+| Cloud Resource IDs | 22 | AWS (ARNs for Secrets Manager, RDS, KMS, IAM, S3, Lambda, ECS, generic), AWS account ID, ECR registry, RDS endpoint, GCP (Secret Manager paths, KMS keys, SA emails, project ID), Azure (resource IDs, subscription/tenant ID, Key Vault, storage URL) |
 | DevOps / CI-CD | 28 | GitHub (6 token types), GitLab (5), Bitbucket, npm, PyPI, Docker Hub, Terraform, Vault, Grafana, Pulumi, Linear |
 | Payment Processors | 10 | Stripe (4 key types), Square, PayPal/Braintree, Adyen, Flutterwave |
 | Communication | 13 | Slack (4 token types), Discord, Twilio, SendGrid, Mailchimp, Mailgun, Telegram, Teams |
@@ -223,7 +224,7 @@ For the complete pattern catalog with prefixes, examples, and selection criteria
 | Private Keys / Tokens | 2 | PEM private key blocks, JWT tokens |
 | Generic Patterns | 3 | `api_key=...`, `password=...`, base64 secrets in env-like contexts |
 | Web3 / Crypto | 11 | Ethereum private keys, BIP39 mnemonics, Bitcoin WIF, Solana, Infura, Alchemy, Etherscan, Ankr, QuickNode |
-| **Total** | **183** | |
+| **Total** | **205** | |
 
 ## Security Scope
 
@@ -235,8 +236,8 @@ This is a **Claude Code hook** that prevents Claude from **seeing** your real se
 
 | Threat | Protected? | How |
 |--------|-----------|-----|
-| Claude seeing your API keys in code | Yes | Pattern-based redaction (183 patterns) |
-| Claude reading .env / credentials files | Yes | File blocking (48 file types) |
+| Claude seeing your API keys in code | Yes | Pattern-based redaction (205 patterns) |
+| Claude reading .env / credentials files | Yes | File blocking (42 file types) |
 | Claude seeing database passwords in connection strings | Yes | Pattern matching (MongoDB, PostgreSQL, MySQL, Redis URLs) |
 | Claude seeing private keys (RSA, Ed25519, etc.) | Yes | PEM header detection + file blocking |
 | Secrets pasted directly in prompts | Yes | UserPromptSubmit hook scans and blocks before API |
@@ -256,7 +257,7 @@ This is a **Claude Code hook** that prevents Claude from **seeing** your real se
 | Secrets pasted in user prompts | **Yes** | UserPromptSubmit hook scans and blocks (new in v2) |
 | Prompt injection telling Claude to exfiltrate secrets | **No** | This is an application-level attack, not a file-reading attack |
 | Secrets in binary files (compiled code, images) | **No** | Binary files are skipped |
-| Secrets in formats we don't have patterns for | **No** | Only the 183 built-in + custom patterns are detected |
+| Secrets in formats we don't have patterns for | **No** | Only the 205 built-in + custom patterns are detected |
 
 ### Bottom line
 
@@ -335,7 +336,7 @@ Re-running `install.sh` updates upstream patterns without affecting your custom 
 ~/.claude/
   hooks/
     redact-restore.py          # Main hook script
-    patterns.py                # 183 secret patterns (updated on install)
+    patterns.py                # 205 secret patterns (updated on install)
     custom-patterns.py         # Your custom patterns (never overwritten)
     custom-patterns.example.py # Example custom patterns file
   settings.json                # Hook registration (UserPromptSubmit + PreToolUse + PostToolUse + SessionEnd)
