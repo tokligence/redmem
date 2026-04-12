@@ -78,9 +78,28 @@ def handle_session_start(data: dict):
         cwd = data.get("cwd", "")
         if cwd:
             from memory.knowledge import search_knowledge
-            # Use session goal or recent context as query
-            query = context[:500] if context else ""
-            knowledge = search_knowledge(cwd, query, current_session_id=session_id)
+            # Extract goal from session_state.md (skip markdown boilerplate)
+            import os
+            goal_query = ""
+            state_path = os.path.join(
+                os.path.expanduser("~/.claude/vault/sessions"),
+                f"{session_id}_state.md"
+            )
+            if os.path.isfile(state_path):
+                with open(state_path) as sf:
+                    for line in sf:
+                        line = line.strip()
+                        if line and not line.startswith("#") and not line.startswith("<!--"):
+                            goal_query = line[:200]
+                            break
+            if not goal_query and context:
+                # Fallback: extract first non-heading line from context
+                for line in context.splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and not line.startswith("<!--") and not line.startswith("["):
+                        goal_query = line[:200]
+                        break
+            knowledge = search_knowledge(cwd, goal_query, current_session_id=session_id) if goal_query else ""
             if knowledge:
                 context = (context + "\n\n" + knowledge) if context else knowledge
         if context:
@@ -116,6 +135,7 @@ def handle_user_prompt_memory(data: dict, shield_result: dict) -> dict:
             if existing_ctx:
                 formatted = existing_ctx + "\n\n" + formatted
             shield_result.setdefault("hookSpecificOutput", {})
+            shield_result["hookSpecificOutput"]["hookEventName"] = "UserPromptSubmit"
             shield_result["hookSpecificOutput"]["additionalContext"] = formatted
     except Exception as e:
         sys.stderr.write(f"[redmem] Search error: {e}\n")
