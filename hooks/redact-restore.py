@@ -563,15 +563,42 @@ try:
                     meta = json.load(f)
                 original_path = meta["original_path"]
                 bak_path = os.path.join(BACKUP_DIR, entry[:-5] + ".bak")
-                # Skip Write-freshness backups — restoring them would
-                # silently revert a completed Write to old file content.
-                if meta.get("write_freshness_only"):
-                    for p in (meta_path, bak_path):
-                        if os.path.exists(p):
-                            os.remove(p)
-                    continue
                 if os.path.exists(bak_path) and os.path.isfile(original_path):
-                    shutil.copy2(bak_path, original_path)
+                    # Safety check: if the file on disk has different content
+                    # than the backup, a Write/Edit already overwrote it.
+                    # Restoring the backup would silently discard that write.
+                    # Only restore if the file still matches the redacted state
+                    # (i.e., the tool never ran or failed before writing).
+                    try:
+                        with open(original_path, "rb") as f:
+                            current_hash = hashlib.sha256(f.read()).hexdigest()
+                        with open(bak_path, "rb") as f:
+                            bak_bytes = f.read()
+                        bak_hash = hashlib.sha256(bak_bytes).hexdigest()
+                        # If hashes match, file was never overwritten — restore
+                        # (this handles the Read redact case: file is redacted,
+                        #  crash, restore original)
+                        # If hashes differ AND file doesn't contain redacted
+                        # content, a Write completed — don't restore.
+                        if current_hash != bak_hash:
+                            # File changed since backup. Check if it still has
+                            # placeholders (= redacted, tool didn't finish).
+                            with open(original_path, "r", errors="replace") as f:
+                                disk_content = f.read()
+                            placeholder_re = re.compile(r'\{\{[A-Z_]+_[a-f0-9]{8}x*\}\}')
+                            if not placeholder_re.search(disk_content):
+                                # No placeholders = Write completed with real data.
+                                # Don't restore old backup.
+                                debug_log(f"Crash recovery: skipping {original_path} (Write completed)")
+                                for p in (meta_path, bak_path):
+                                    if os.path.exists(p):
+                                        os.remove(p)
+                                continue
+                        # Either hashes match (restore redacted -> original)
+                        # or file has placeholders (tool failed mid-write, restore)
+                        shutil.copy2(bak_path, original_path)
+                    except (OSError, PermissionError):
+                        shutil.copy2(bak_path, original_path)
                     # Restore original permissions and timestamps from metadata
                     if "mode" in meta:
                         os.chmod(original_path, meta["mode"])
@@ -982,22 +1009,11 @@ try:
                             except OSError:
                                 pass
                 elif tool_name == "Write":
-                    # Write completed successfully. Mark backup as freshness-only
-                    # so crash recovery won't restore it (the old file content
-                    # is now irrelevant — the Write overwrote it).
-                    bak_meta = backup_path_for(file_path) + ".meta"
-                    if os.path.exists(bak_meta):
-                        try:
-                            with open(bak_meta) as f:
-                                meta = json.load(f)
-                            meta["write_freshness_only"] = True
-                            with open(bak_meta, "w") as f:
-                                json.dump(meta, f)
-                        except (OSError, json.JSONDecodeError):
-                            pass
                     # Scan for residual placeholders in the written file.
                     # Do NOT fall back to backup restore on error — the backup
                     # is the OLD file, not the new write.
+                    # NOTE: crash recovery now uses content comparison to detect
+                    # completed writes, so no write_freshness_only flag needed.
                     mapping = load_mapping()
                     if mapping.get("placeholder_to_secret"):
                         try:
@@ -1165,11 +1181,8 @@ try:
         # only used as a redaction marker; cleanup_backup deletes it.
         if file_path and os.path.isfile(file_path):
             backup_and_redact_file(file_path, mapping)
-            # NOTE: Do NOT mark the backup as freshness-only here.
-            # If Claude Code crashes before Write completes, crash
-            # recovery must restore the original file (with real secrets).
-            # The write_freshness_only flag is set in PostToolUse AFTER
-            # Write succeeds, so crash recovery only skips completed writes.
+            # Crash recovery uses content comparison (hash + placeholder
+            # detection) to decide whether to restore. No flag needed.
 
         # Restore placeholders in the content being written
         restored = restore_content(write_content, mapping)
