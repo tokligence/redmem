@@ -410,7 +410,7 @@ Key findings from real session analysis (36,850 lines, 37 compacts):
 | Turn ordering | No `line_number` field. UUID + parentUuid chain. Line number = natural order. |
 | Deletion | **None.** All original turns preserved. Compact only appends markers. |
 
-**Implication for ingest:** Track last archived line number (not line_number).
+**Implication for ingest:** Track last archived line number (not turn_index — that field doesn't exist).
 Skip `compact_boundary` and `isCompactSummary` entries. Append everything else.
 
 ## Ingest: Archiving Turns
@@ -738,14 +738,20 @@ CREATE INDEX idx_turns_user_session ON redmem.turns(user_id, session_id, line_nu
 CREATE INDEX idx_turns_project ON redmem.turns(project_dir, created_at);
 
 -- Row-Level Security for multi-tenant
--- NOTE: RLS uses the authenticated DB role, NOT client-controlled GUCs.
--- Each user connects with their own DB role (e.g. redmem_tony).
--- Admin role (redmem_admin) granted explicit read-all.
+-- Row-Level Security: map DB role -> user_id via a lookup table.
+-- This avoids requiring user_id = DB role name (emails vs role names differ).
+CREATE TABLE redmem.user_roles (
+    db_role   TEXT PRIMARY KEY,  -- PostgreSQL role name (e.g. redmem_tony)
+    user_id   TEXT NOT NULL      -- application identity (e.g. tony@company.com)
+);
+
 ALTER TABLE redmem.turns ENABLE ROW LEVEL SECURITY;
 CREATE POLICY user_own_data ON redmem.turns
-    FOR ALL USING (user_id = current_user);       -- DB-authenticated role
+    FOR ALL USING (user_id = (
+        SELECT user_id FROM redmem.user_roles WHERE db_role = current_user
+    ));
 CREATE POLICY admin_all ON redmem.turns
-    FOR SELECT TO redmem_admin USING (true);       -- explicit admin role
+    FOR SELECT TO redmem_admin USING (true);
 
 -- Same pattern for milestones, sessions, state_events tables
 ```
