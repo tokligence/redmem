@@ -58,6 +58,9 @@ def handle_pre_compact(data: dict):
         # Generate session_state.md (Phase 1.5)
         from memory.session_state import generate_session_state
         generate_session_state(session_id, cwd)
+        # Update cross-session knowledge index (Phase 4)
+        from memory.knowledge import update_session_knowledge
+        update_session_knowledge(session_id, cwd)
     except Exception as e:
         sys.stderr.write(f"[redmem] Archive error: {e}\n")
 
@@ -71,6 +74,15 @@ def handle_session_start(data: dict):
     try:
         from memory.summarize import build_resume_context
         context = build_resume_context(session_id)
+        # Append cross-session knowledge if available
+        cwd = data.get("cwd", "")
+        if cwd:
+            from memory.knowledge import search_knowledge
+            # Use session goal or recent context as query
+            query = context[:500] if context else ""
+            knowledge = search_knowledge(cwd, query, current_session_id=session_id)
+            if knowledge:
+                context = (context + "\n\n" + knowledge) if context else knowledge
         if context:
             print(json.dumps({
                 "hookSpecificOutput": {

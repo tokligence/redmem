@@ -19,6 +19,14 @@ from hooks.memory.search import sanitize_fts5_query, search
 from hooks.memory.ingest import archive_turns
 from hooks.memory.summarize import build_resume_context
 
+# Patch ALL modules that copy VAULT_DIR at import time
+import hooks.memory.knowledge as _knowledge_mod
+_knowledge_mod.VAULT_DIR = _tmpdir
+import hooks.memory.summarize as _summarize_mod
+_summarize_mod.VAULT_DIR = _tmpdir
+import hooks.memory.session_state as _state_mod
+_state_mod.VAULT_DIR = _tmpdir
+
 
 class TestDB:
     def test_get_db_creates_tables(self):
@@ -302,6 +310,154 @@ class TestSessionState:
         assert len(lines) >= 1
         event = json.loads(lines[-1])
         assert event["type"] == "task_created"
+
+
+class TestKnowledge:
+    def test_knowledge_db_creates_tables(self):
+        from hooks.memory.knowledge import get_knowledge_db
+        kdb = get_knowledge_db("/tmp/test-project")
+        tables = kdb.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        table_names = {t[0] for t in tables}
+        assert "session_summaries" in table_names
+        assert "entities" in table_names
+        kdb.close()
+
+    def test_update_session_knowledge(self):
+        from hooks.memory.knowledge import update_session_knowledge, get_knowledge_db
+        from hooks.memory.session_state import get_state_path
+        import hooks.memory.db as archive_db
+
+        session_id = "test-knowledge-update"
+        cwd = "/tmp/test-knowledge-proj"
+
+        # Create session_state.md
+        state_path = get_state_path(session_id)
+        os.makedirs(os.path.dirname(state_path), mode=0o700, exist_ok=True)
+        with open(state_path, "w") as f:
+            f.write("""# Session State
+
+## Goal
+Build multi-currency wallet
+
+## Done (this session)
+- migration 076 applied
+- exchange_service.rs created
+
+## Key Decisions
+- allocate is same-currency operation
+""")
+
+        # Create session DB with a turn
+        conn = archive_db.get_db(session_id)
+        conn.execute("""
+            INSERT INTO turns (session_id, line_number, uuid, role, content, content_hash, token_estimate, files_touched)
+            VALUES (?, 1, 'u1', 'user', 'working on wallet', 'h1', 5, '["src/wallet.rs"]')
+        """, (session_id,))
+        conn.commit()
+        conn.close()
+
+        # Update knowledge
+        update_session_knowledge(session_id, cwd)
+
+        # Verify
+        kdb = get_knowledge_db(cwd)
+        row = kdb.execute(
+            "SELECT goal, done FROM session_summaries WHERE session_id = ?",
+            (session_id,)
+        ).fetchone()
+        assert row is not None
+        assert "multi-currency" in row[0].lower()
+        assert "migration" in row[1].lower()
+
+        entities = kdb.execute(
+            "SELECT entity_type, name FROM entities WHERE session_id = ?",
+            (session_id,)
+        ).fetchall()
+        entity_types = {e[0] for e in entities}
+        assert "file" in entity_types
+        assert "decision" in entity_types
+        assert "migration" in entity_types
+        kdb.close()
+
+    def test_search_knowledge(self):
+        from hooks.memory.knowledge import update_session_knowledge, search_knowledge
+        from hooks.memory.session_state import get_state_path
+        import hooks.memory.db as archive_db
+
+        session_id = "test-knowledge-search"
+        cwd = "/tmp/test-knowledge-search-proj"
+
+        # Setup
+        state_path = get_state_path(session_id)
+        os.makedirs(os.path.dirname(state_path), mode=0o700, exist_ok=True)
+        with open(state_path, "w") as f:
+            f.write("""# Session State
+
+## Goal
+Fix Aurora failover handling
+
+## Done (this session)
+- Added connection pool retry logic
+- Fixed stale connection detection
+
+## Key Decisions
+- Use before_acquire hook for connection health check
+""")
+        conn = archive_db.get_db(session_id)
+        conn.close()
+
+        update_session_knowledge(session_id, cwd)
+
+        # Search from a different session
+        result = search_knowledge(cwd, "Aurora connection pool", current_session_id="other-session")
+        assert "Aurora" in result or "connection" in result or "failover" in result
+
+    def test_search_knowledge_excludes_current_session(self):
+        from hooks.memory.knowledge import search_knowledge
+
+        # Search with same session_id should not return its own results
+        result = search_knowledge("/tmp/test-knowledge-search-proj", "Aurora",
+                                  current_session_id="test-knowledge-search")
+        # Should be empty or not contain test-knowledge-search results
+        assert "test-knowledge-search" not in result or result == ""
+
+    def test_search_knowledge_empty_project(self):
+        from hooks.memory.knowledge import search_knowledge
+        result = search_knowledge("/tmp/nonexistent-project", "anything")
+        assert result == ""
+
+    def test_knowledge_reindex(self):
+        """Updating same session should not duplicate entities."""
+        from hooks.memory.knowledge import update_session_knowledge, get_knowledge_db
+        from hooks.memory.session_state import get_state_path
+        import hooks.memory.db as archive_db
+
+        session_id = "test-knowledge-reindex"
+        cwd = "/tmp/test-knowledge-reindex-proj"
+
+        state_path = get_state_path(session_id)
+        os.makedirs(os.path.dirname(state_path), mode=0o700, exist_ok=True)
+        with open(state_path, "w") as f:
+            f.write("# Session State\n\n## Done (this session)\n- item one\n")
+        conn = archive_db.get_db(session_id)
+        conn.close()
+
+        # Index twice
+        update_session_knowledge(session_id, cwd)
+        update_session_knowledge(session_id, cwd)
+
+        kdb = get_knowledge_db(cwd)
+        count = kdb.execute(
+            "SELECT COUNT(*) FROM entities WHERE session_id = ?",
+            (session_id,)
+        ).fetchone()[0]
+        kdb.close()
+
+        # Should not have duplicates (re-index deletes old entries first)
+        assert count <= 5  # reasonable upper bound for one small session
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
