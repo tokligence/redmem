@@ -160,7 +160,7 @@ def main():
 CREATE TABLE turns (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id    TEXT    NOT NULL,
-    turn_index    INTEGER NOT NULL,
+    line_number   INTEGER NOT NULL,  -- JSONL line number (natural order)
     role          TEXT    NOT NULL,
     content       TEXT    NOT NULL,  -- pre-redacted by shield
     content_hash  TEXT    NOT NULL,  -- SHA-256 dedup guard
@@ -169,7 +169,7 @@ CREATE TABLE turns (
     tool_input    TEXT,             -- JSON: summarized parameters
     files_touched TEXT,             -- JSON array
     created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(session_id, turn_index)
+    UNIQUE(session_id, line_number)
 );
 
 CREATE VIRTUAL TABLE turns_fts USING fts5(
@@ -211,14 +211,14 @@ CREATE TABLE sessions (
 CREATE TABLE state_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id  TEXT    NOT NULL,
-    turn_index  INTEGER,
+    line_number INTEGER,
     event_type  TEXT    NOT NULL,
     title       TEXT    NOT NULL,
     detail      TEXT,
     created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX idx_turns_session     ON turns(session_id, turn_index);
+CREATE INDEX idx_turns_session     ON turns(session_id, line_number);
 CREATE INDEX idx_turns_role        ON turns(session_id, role);
 CREATE INDEX idx_milestones_sess   ON milestones(session_id, turn_start);
 CREATE INDEX idx_state_events_sess ON state_events(session_id, created_at);
@@ -391,6 +391,28 @@ def memory_search_archive(data):
 
 ---
 
+## JSONL Format (Verified)
+
+Claude Code session JSONL is **append-only**. Compact does NOT delete turns.
+
+```
+Before compact:  [turn 1] [turn 2] ... [turn 2000]
+After compact:   [turn 1] [turn 2] ... [turn 2000] [compact_boundary] [summary] [turn 2001] ...
+After 2nd:       [...all above...] [compact_boundary] [summary] [turn 3001] ...
+```
+
+Key findings from real session analysis (36,850 lines, 37 compacts):
+
+| Field | Value |
+|-------|-------|
+| Compact boundary | `type=system, subtype=compact_boundary, compactMetadata={trigger, preTokens}` |
+| Summary entry | `type=user, isCompactSummary=true` (immediately after boundary) |
+| Turn ordering | No `turn_index` field. UUID + parentUuid chain. Line number = natural order. |
+| Deletion | **None.** All original turns preserved. Compact only appends markers. |
+
+**Implication for ingest:** Track last archived line number (not turn_index).
+Skip `compact_boundary` and `isCompactSummary` entries. Append everything else.
+
 ## Ingest: Archiving Turns
 
 ```python
@@ -403,40 +425,35 @@ def memory_archive_turns(data):
     if not transcript_path:
         return
 
-    db = get_or_create_archive_db(session_id)
+    backend = get_archive_backend()  # SQLite or PostgreSQL
 
-    max_index = db.execute(
-        "SELECT COALESCE(MAX(turn_index), -1) FROM turns WHERE session_id = ?",
-        (session_id,)
-    ).fetchone()[0]
+    max_line = backend.get_max_line_number(session_id)
 
-    turns = parse_transcript_jsonl(transcript_path)
-    new_turns = [t for t in turns if t.index > max_index]
-    if not new_turns:
-        return
+    # Parse JSONL from last archived line onward (incremental)
+    new_turns = []
+    with open(transcript_path) as f:
+        for line_num, line in enumerate(f, 1):
+            if line_num <= max_line:
+                continue
+            try:
+                obj = json.loads(line.strip())
+            except json.JSONDecodeError:
+                continue
 
-    # Content is pre-redacted -- Claude never saw real secrets.
-    # Secondary defense: sanitize each turn to catch secrets that leaked
-    # through Bash/curl tool results (bypassing the Read redaction path).
-    new_turns = [sanitize_turn(t) for t in new_turns]
+            # Skip compact markers and non-conversation entries
+            if obj.get('subtype') == 'compact_boundary':
+                continue
+            if obj.get('isCompactSummary'):
+                continue
+            if obj.get('type') not in ('user', 'assistant'):
+                continue
 
-    db.executemany("""
-        INSERT OR IGNORE INTO turns
-        (session_id, turn_index, role, content, content_hash,
-         token_estimate, tool_name, tool_input, files_touched)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, [turn_to_row(session_id, t) for t in new_turns])
+            turn = parse_turn(obj, line_num, session_id)
+            turn = sanitize_turn(turn)  # secondary secret defense
+            new_turns.append(turn)
 
-    db.execute("""
-        INSERT INTO sessions (session_id, project_dir, total_turns, total_compacts)
-        VALUES (?, ?, ?, 1)
-        ON CONFLICT(session_id) DO UPDATE SET
-            last_seen = datetime('now'),
-            total_turns = excluded.total_turns,
-            total_compacts = total_compacts + 1
-    """, (session_id, data.get('cwd', ''), len(turns)))
-
-    db.commit()
+    if new_turns:
+        backend.ingest(session_id, new_turns)
 ```
 
 ---
@@ -560,6 +577,218 @@ def sanitize_for_archive(content: str) -> str:
 ```
 
 ---
+
+## Pluggable Backend Architecture
+
+redmem supports two backend modes via `~/.claude/redmem.yaml`:
+
+### Configuration
+
+```yaml
+# Local mode (default, zero config)
+backend:
+  archive: sqlite    # SQLite FTS5, one file per session
+  vector: none       # Phase 3: sqlite-vec
+
+# PostgreSQL mode (local or enterprise)
+backend:
+  archive: postgres
+  archive_dsn: "postgresql://redmem:pass@localhost:5432/redmem"
+  vector: pgvector   # Phase 3: co-located with archive
+  # vector_dsn defaults to archive_dsn
+
+# Enterprise mode (remote, multi-tenant)
+backend:
+  archive: postgres
+  archive_dsn: "postgresql://redmem:pass@db.company.com:5432/redmem"
+  vector: pgvector
+  user_id: "tony@company.com"  # multi-tenant identity
+```
+
+### Abstract Interface
+
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import List, Optional
+
+@dataclass
+class Turn:
+    session_id: str
+    line_number: int      # JSONL line number (natural order, no turn_index)
+    uuid: str             # Claude Code UUID
+    role: str
+    content: str
+    content_hash: str
+    tool_name: Optional[str] = None
+    files_touched: Optional[List[str]] = None
+    user_id: Optional[str] = None  # multi-tenant (enterprise)
+
+@dataclass
+class SearchResult:
+    turn: Turn
+    relevance: float
+    context_before: Optional[Turn] = None
+    context_after: Optional[Turn] = None
+
+
+class ArchiveBackend(ABC):
+    @abstractmethod
+    def ingest(self, session_id: str, turns: List[Turn]) -> int: ...
+
+    @abstractmethod
+    def search(self, session_id: str, query: str, limit: int = 10) -> List[SearchResult]: ...
+
+    @abstractmethod
+    def get_recent(self, session_id: str, limit: int = 50) -> List[Turn]: ...
+
+    @abstractmethod
+    def get_max_line_number(self, session_id: str) -> int: ...
+
+    @abstractmethod
+    def save_milestone(self, session_id: str, turn_start: int,
+                       turn_end: int, summary: str): ...
+
+    @abstractmethod
+    def get_latest_milestone(self, session_id: str) -> Optional[dict]: ...
+
+
+class VectorBackend(ABC):
+    @abstractmethod
+    def embed_and_store(self, session_id: str, turn_id: int, content: str): ...
+
+    @abstractmethod
+    def search_similar(self, session_id: str, query: str,
+                       limit: int = 10) -> List[SearchResult]: ...
+```
+
+### SQLite Implementation (Default)
+
+```python
+class SQLiteArchive(ArchiveBackend):
+    """Single-file SQLite FTS5. Zero dependencies."""
+    def __init__(self, session_id: str):
+        db_path = f"~/.claude/vault/sessions/{session_id}.db"
+        self.db = sqlite3.connect(os.path.expanduser(db_path))
+        self._ensure_schema()
+
+    def ingest(self, session_id, turns):
+        self.db.executemany("INSERT OR IGNORE INTO turns ...", ...)
+        self.db.commit()
+        return len(turns)
+
+    def search(self, session_id, query, limit=10):
+        safe = sanitize_fts5_query(query)
+        return self.db.execute("SELECT ... FROM turns_fts ... MATCH ?", ...)
+```
+
+### PostgreSQL Implementation
+
+```python
+class PostgresArchive(ArchiveBackend):
+    """PostgreSQL + tsvector. Multi-user, multi-tenant."""
+    def __init__(self, dsn: str, user_id: str = None):
+        self.pool = psycopg_pool.ConnectionPool(dsn)
+        self.user_id = user_id
+
+    def ingest(self, session_id, turns):
+        with self.pool.connection() as conn:
+            conn.executemany("""
+                INSERT INTO redmem.turns (user_id, session_id, ...)
+                VALUES (%s, %s, ...) ON CONFLICT DO NOTHING
+            """, ...)
+
+    def search(self, session_id, query, limit=10):
+        with self.pool.connection() as conn:
+            return conn.execute("""
+                SELECT *, ts_rank(tsv, query) AS relevance
+                FROM redmem.turns, plainto_tsquery('english', %s) query
+                WHERE tsv @@ query AND session_id = %s
+                ORDER BY relevance DESC LIMIT %s
+            """, (query, session_id, limit))
+```
+
+### PostgreSQL Schema (Multi-Tenant)
+
+```sql
+CREATE SCHEMA IF NOT EXISTS redmem;
+
+CREATE TABLE redmem.turns (
+    id            BIGSERIAL PRIMARY KEY,
+    user_id       TEXT    NOT NULL,
+    session_id    TEXT    NOT NULL,
+    project_dir   TEXT,
+    line_number   INTEGER NOT NULL,
+    uuid          TEXT    NOT NULL,
+    role          TEXT    NOT NULL,
+    content       TEXT    NOT NULL,
+    content_hash  TEXT    NOT NULL,
+    token_estimate INTEGER,
+    tool_name     TEXT,
+    files_touched JSONB,
+    tsv           TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+    embedding     vector(384),  -- pgvector (Phase 3)
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(user_id, session_id, line_number)
+);
+
+CREATE INDEX idx_turns_fts ON redmem.turns USING GIN (tsv);
+CREATE INDEX idx_turns_vec ON redmem.turns USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_turns_user_session ON redmem.turns(user_id, session_id, line_number);
+CREATE INDEX idx_turns_project ON redmem.turns(project_dir, created_at);
+
+-- Row-Level Security for multi-tenant
+ALTER TABLE redmem.turns ENABLE ROW LEVEL SECURITY;
+CREATE POLICY user_own_data ON redmem.turns
+    FOR ALL USING (user_id = current_setting('redmem.current_user'));
+CREATE POLICY admin_all ON redmem.turns
+    FOR SELECT USING (current_setting('redmem.is_admin', true) = 'true');
+
+-- Same pattern for milestones, sessions, state_events tables
+```
+
+### Backend Factory
+
+```python
+def get_archive_backend(session_id: str = None) -> ArchiveBackend:
+    config = load_config()  # ~/.claude/redmem.yaml
+    backend_type = config.get('backend', {}).get('archive', 'sqlite')
+
+    if backend_type == 'sqlite':
+        return SQLiteArchive(session_id)
+    elif backend_type == 'postgres':
+        dsn = config['backend']['archive_dsn']
+        user_id = config['backend'].get('user_id')
+        return PostgresArchive(dsn, user_id)
+    else:
+        raise ValueError(f"Unknown backend: {backend_type}")
+
+def get_vector_backend(session_id: str = None) -> Optional[VectorBackend]:
+    config = load_config()
+    vector_type = config.get('backend', {}).get('vector', 'none')
+
+    if vector_type == 'none':
+        return None
+    elif vector_type == 'sqlite-vec':
+        return SQLiteVecVector(session_id)
+    elif vector_type == 'pgvector':
+        dsn = config['backend'].get('vector_dsn') or config['backend']['archive_dsn']
+        return PgvectorVector(dsn)
+    else:
+        raise ValueError(f"Unknown vector backend: {vector_type}")
+```
+
+### Enterprise Value
+
+```
+50 engineers x Claude Code daily:
+  -> ~10k turns/day, ~3.6M turns/year
+  -> "Who solved Aurora failover before?" (cross-user search)
+  -> "When was this API decision made?" (project + time search)
+  -> "New hire: search all sessions on this repo" (knowledge transfer)
+  -> "Most common prompt patterns" (usage analytics)
+```
+
 
 ## CLI
 
