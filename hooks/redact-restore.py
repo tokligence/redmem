@@ -563,6 +563,13 @@ try:
                     meta = json.load(f)
                 original_path = meta["original_path"]
                 bak_path = os.path.join(BACKUP_DIR, entry[:-5] + ".bak")
+                # Skip Write-freshness backups — restoring them would
+                # silently revert a completed Write to old file content.
+                if meta.get("write_freshness_only"):
+                    for p in (meta_path, bak_path):
+                        if os.path.exists(p):
+                            os.remove(p)
+                    continue
                 if os.path.exists(bak_path) and os.path.isfile(original_path):
                     shutil.copy2(bak_path, original_path)
                     # Restore original permissions and timestamps from metadata
@@ -1149,6 +1156,21 @@ try:
         # only used as a redaction marker; cleanup_backup deletes it.
         if file_path and os.path.isfile(file_path):
             backup_and_redact_file(file_path, mapping)
+            # Mark this backup as freshness-only so crash recovery
+            # (restore_pending_backups) skips it. Without this flag,
+            # a crash between Write and PostToolUse cleanup would
+            # restore the OLD file content, silently discarding the write.
+            bp = backup_path_for(file_path)
+            meta_path = bp + ".meta"
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path) as f:
+                        meta = json.load(f)
+                    meta["write_freshness_only"] = True
+                    with open(meta_path, "w") as f:
+                        json.dump(meta, f)
+                except (OSError, json.JSONDecodeError):
+                    pass
 
         # Restore placeholders in the content being written
         restored = restore_content(write_content, mapping)
