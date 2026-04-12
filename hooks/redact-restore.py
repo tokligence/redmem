@@ -585,7 +585,7 @@ try:
                             # placeholders (= redacted, tool didn't finish).
                             with open(original_path, "r", errors="replace") as f:
                                 disk_content = f.read()
-                            placeholder_re = re.compile(r'\{\{[A-Z_]+_[a-f0-9]{8}x*\}\}')
+                            placeholder_re = re.compile(r'\{\{[A-Z0-9_]+_[a-f0-9]{8}x*\}\}')
                             if not placeholder_re.search(disk_content):
                                 # No placeholders = Write completed with real data.
                                 # Don't restore old backup.
@@ -1065,7 +1065,7 @@ try:
                                 pass
 
                 # Check each candidate file for placeholder contamination
-                placeholder_re = re.compile(r'\{\{[A-Z_]+_[a-f0-9]{8}x*\}\}')
+                placeholder_re = re.compile(r'\{\{[A-Z0-9_]+_[a-f0-9]{8}x*\}\}')
                 for path in candidate_paths:
                     if not os.path.isfile(path):
                         continue
