@@ -976,8 +976,12 @@ try:
                                 pass
                 elif tool_name == "Write":
                     # After Write: file was written with placeholders restored
-                    # in PreToolUse, but may still contain residual placeholders
-                    # or new secrets. Scan and fix, mirroring Edit's PostToolUse.
+                    # in PreToolUse, but may still contain residual placeholders.
+                    # Scan and fix.
+                    # NOTE: Do NOT fall back to backup restore on error -- for
+                    # Write operations there is no valid backup (PreToolUse no
+                    # longer creates one). Falling back to an old backup would
+                    # silently discard the new file content.
                     mapping = load_mapping()
                     if mapping.get("placeholder_to_secret"):
                         try:
@@ -989,11 +993,7 @@ try:
                                     f.write(restored)
                                 debug_log(f"Write PostToolUse: restored placeholders in {file_path}")
                         except OSError:
-                            # Fall back to restoring from backup
-                            try:
-                                shutil.copy2(bak_file, file_path)
-                            except OSError:
-                                pass
+                            debug_log(f"Write PostToolUse: could not scan {file_path}")
                 cleanup_backup(file_path)
 
         # ── Bash PostToolUse: fix files that may have been written with ──────
@@ -1141,14 +1141,18 @@ try:
         file_path = tool_input.get("file_path", "")
         write_content = tool_input.get("content", "")
 
-        # Re-redact the file so Claude Code's freshness check passes.
-        # PostToolUse will clean up the backup after Write completes.
-        if file_path and os.path.isfile(file_path):
-            backup_and_redact_file(file_path, mapping)
+        # NOTE: Do NOT backup_and_redact_file for Write operations.
+        # Write replaces the entire file -- freshness check is irrelevant
+        # (that is an Edit concern). Backing up + redacting the old file
+        # caused silent data loss: if PostToolUse fell back to the backup
+        # on any error, it restored the OLD file content, discarding the
+        # new write entirely. This was the root cause of "Write tool
+        # silently fails on files with redacted patterns."
 
         # Restore placeholders in the content being written
         restored = restore_content(write_content, mapping)
         if restored != write_content:
+            debug_log(f"Write PreToolUse: restored placeholders in content for {file_path}")
             allow_with_update({
                 "file_path": file_path,
                 "content": restored
