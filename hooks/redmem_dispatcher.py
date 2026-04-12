@@ -13,6 +13,9 @@ import subprocess
 import sys
 
 HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
+# Ensure memory module is importable when running from any cwd
+if HOOKS_DIR not in sys.path:
+    sys.path.insert(0, HOOKS_DIR)
 
 # Task/plan tools that trigger state tracking
 TASK_PLAN_TOOLS = {"TodoWrite", "TodoRead", "EnterPlanMode", "ExitPlanMode",
