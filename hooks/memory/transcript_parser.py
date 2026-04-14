@@ -77,47 +77,53 @@ def parse_incremental(transcript_path: str, session_id: str,
     Skips compact_boundary, isCompactSummary, and non-conversation entries.
     """
     turns = []
+    # Read all lines. Drop the last line if it doesn't end with \n —
+    # it's a partial write from an active session, will be caught next run.
     with open(transcript_path) as f:
-        for line_num, line in enumerate(f, 1):
-            if line_num <= after_line:
-                continue
-            try:
-                obj = json.loads(line.strip())
-            except json.JSONDecodeError:
-                continue
+        all_lines = f.readlines()
+    if all_lines and not all_lines[-1].endswith("\n"):
+        all_lines = all_lines[:-1]
 
-            # Skip compact markers
-            if obj.get("subtype") == "compact_boundary":
-                continue
-            if obj.get("isCompactSummary"):
-                continue
+    for line_num, line in enumerate(all_lines, 1):
+        if line_num <= after_line:
+            continue
+        try:
+            obj = json.loads(line.strip())
+        except json.JSONDecodeError:
+            continue
 
-            entry_type = obj.get("type", "")
-            if entry_type not in ("user", "assistant"):
-                continue
+        # Skip compact markers
+        if obj.get("subtype") == "compact_boundary":
+            continue
+        if obj.get("isCompactSummary"):
+            continue
 
-            message = obj.get("message", {})
-            if not isinstance(message, dict):
-                continue
+        entry_type = obj.get("type", "")
+        if entry_type not in ("user", "assistant"):
+            continue
 
-            text = extract_text(message)
-            if not text.strip():
-                continue
+        message = obj.get("message", {})
+        if not isinstance(message, dict):
+            continue
 
-            uuid = obj.get("uuid", "")
-            role = message.get("role", entry_type)
-            tool_name, tool_input = extract_tool_info(message)
-            files = extract_files(message)
+        text = extract_text(message)
+        if not text.strip():
+            continue
 
-            turns.append(ParsedTurn(
-                line_number=line_num,
-                uuid=uuid,
-                role=role,
-                content=text,
-                tool_name=tool_name,
-                tool_input=tool_input,
-                files_touched=files,
-            ))
+        uuid = obj.get("uuid", "")
+        role = message.get("role", entry_type)
+        tool_name, tool_input = extract_tool_info(message)
+        files = extract_files(message)
+
+        turns.append(ParsedTurn(
+            line_number=line_num,
+            uuid=uuid,
+            role=role,
+            content=text,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            files_touched=files,
+        ))
     return turns
 
 
