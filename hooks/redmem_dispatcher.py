@@ -75,6 +75,15 @@ def handle_session_start(data: dict):
         return
 
     try:
+        # Archive any new turns FIRST to capture anything since last archive
+        # (watch daemon may have missed up to its interval window)
+        cwd_early = data.get("cwd", "")
+        from memory.ingest import archive_turns
+        try:
+            archive_turns(session_id, cwd_early)
+        except Exception:
+            pass  # non-fatal, continue with existing archive
+
         from memory.summarize import build_resume_context
         context = build_resume_context(session_id)
         # Append cross-session knowledge if available
