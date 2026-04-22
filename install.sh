@@ -114,13 +114,15 @@ for FILE in __init__.py db.py transcript_parser.py ingest.py search.py summarize
 done
 echo "  OK: Memory module installed"
 
-# ── Install dispatcher ──────────────────────────────────────────────────
+# ── Install dispatcher + image compressor ──────────────────────────────
 echo "  -> Installing dispatcher..."
 install_file "hooks/redmem_dispatcher.py" "$HOOKS_DIR/redmem_dispatcher.py"
 chmod +x "$HOOKS_DIR/redmem_dispatcher.py"
 install_file "hooks/redmem_catchup.py"    "$HOOKS_DIR/redmem_catchup.py"
 chmod +x "$HOOKS_DIR/redmem_catchup.py"
-echo "  OK: Dispatcher + catchup installed"
+install_file "hooks/image_compressor.py"  "$HOOKS_DIR/image_compressor.py"
+chmod +x "$HOOKS_DIR/image_compressor.py"
+echo "  OK: Dispatcher + catchup + image compressor installed"
 
 # ── Autopilot module + slash commands ───────────────────────────────────
 echo "  -> Installing autopilot module..."

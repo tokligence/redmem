@@ -5,6 +5,13 @@ All notable changes to redmem will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Image compressor** (`hooks/image_compressor.py`): transparently downscale large images before Claude reads them, cutting vision tokens (~66% on a typical phone screenshot) without altering the on-disk file.
+  - Fires from `PreToolUse(Read)` via the dispatcher; returns `updatedInput` with a compressed cache path.
+  - Thresholds: only rewrites images > 500 KB AND longest side > 1920 px. Smaller images pass through unchanged.
+  - Uses macOS-native `sips` (no Python dependencies); fail-open on non-macOS or any tool error.
+  - Cache: `/tmp/redmem-img-cache/<sha1>-<mtime>.<ext>` — mtime in filename ensures edits invalidate.
+  - Three opt-out layers: `REDMEM_NO_IMAGE_COMPRESS=1` env (host-wide), `.redmem-no-compress` file (per-project), `.orig.` / `.nocompress.` filename marker (per-image).
+  - 27 tests (`test_image_compressor.py`) covering opt-outs, thresholds, cache invalidation, and a real-`sips` integration test (skipped where unavailable).
 - **Autopilot module** (`hooks/autopilot/`): overnight spec-driven loop that keeps Claude Code working unattended.
   - Three slash commands: `/autopilot [max_loop=150] <full-spec-path>`, `/autopilot-stop`, `/autopilot-status`.
   - Stop-hook re-injects a continuation message every turn until Claude emits `[[AUTOPILOT_DONE]]` or a halt condition trips (max_loop, 5-turn no-repo-change streak, 10h wall clock).

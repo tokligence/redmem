@@ -91,6 +91,34 @@ No configuration needed. If you ever want to disable native recap:
 - **Task tracking** — captures TaskCreate/TaskUpdate/Plan changes via PostToolUse hook
 - **Full-text search** — BM25 ranking with porter stemmer + unicode support
 
+### Image Compressor (always on)
+
+Claude's vision API charges by image tile — a single 4K screenshot can
+cost 6–12k tokens per Read. redmem transparently downscales large images
+before they reach the API: a PreToolUse hook rewrites `tool_input.file_path`
+to a cached, compressed copy (longest side ≤ 1920px, format preserved).
+
+- **Scope** — all sessions, every Read of an image file. Not autopilot-gated.
+- **Thresholds** — skips images < 500 KB OR with longest side < 1920 px.
+- **Tool** — macOS-native `sips` (no Python deps). Falls back to original
+  file on non-macOS systems or any error.
+- **Cache** — `/tmp/redmem-img-cache/<sha1>-<mtime>.<ext>`. mtime in the
+  filename auto-invalidates when you edit the source.
+- **Transparent** — the original file on disk is untouched; only
+  Claude's view gets the smaller copy.
+
+**Opt out (three granularities):**
+
+| Scope | How |
+|-------|-----|
+| Host-wide | `export REDMEM_NO_IMAGE_COMPRESS=1` |
+| One project | `touch <repo>/.redmem-no-compress` |
+| One image | name it `foo.orig.png` or `foo.nocompress.png` |
+
+**Typical savings** (iPhone screenshot, 3024×4032, 2.5 MB): ~66% fewer
+vision tokens per Read. Over an autopilot-style overnight run, that's
+tens of thousands of tokens.
+
 ### Guard (optional)
 
 An opt-in third capability that prevents the most common footgun in

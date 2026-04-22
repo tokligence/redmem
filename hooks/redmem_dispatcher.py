@@ -192,6 +192,19 @@ def handle_pretooluse_bash_guard(data: dict) -> dict | None:
         return None
 
 
+def handle_pretooluse_image_compress(data: dict) -> dict | None:
+    """Transparently downscale large images before Claude reads them, to
+    save vision tokens. Active for all sessions; fail-open."""
+    if data.get("tool_name") != "Read":
+        return None
+    try:
+        from image_compressor import maybe_compress_read
+        return maybe_compress_read(data)
+    except Exception as e:
+        sys.stderr.write(f"[redmem] image compress error: {e}\n")
+        return None
+
+
 def handle_stop(data: dict):
     """Emit Stop hook decision for autopilot (or allow stop)."""
     try:
@@ -289,6 +302,13 @@ def main():
         guard_resp = handle_pretooluse_bash_guard(data)
         if guard_resp:
             print(json.dumps(guard_resp))
+            sys.exit(0)
+
+        # Image compressor (all sessions). Wins if it rewrites file_path,
+        # because shield has no meaningful change for non-blocked Read paths.
+        img_resp = handle_pretooluse_image_compress(data)
+        if img_resp:
+            print(json.dumps(img_resp))
             sys.exit(0)
 
         if shield_result:
